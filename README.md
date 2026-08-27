@@ -31,6 +31,17 @@
 PySAGES (Python Suite for Advanced General Ensemble Simulations) is a Python
 implementation of [SSAGES](https://ssagesproject.github.io) with support for GPUs.
 
+## This fork: the `mlmd` backend
+
+This branch adds a backend for [mlmd](https://github.com/...) — molecular dynamics with JAX
+machine-learning potentials — in `pysages/backends/mlmd.py`. `generate_context()` returns an
+`mlmd.Langevin`/`VelocityVerlet` object and the whole biased step (potential, collective variables,
+bias, integrator) runs as one compiled JAX program, so enhanced sampling costs about as much as
+unbiased MD. See `examples/mlmd/` for the usage pattern and `tests/test_mlmd_backend.py` for the
+bias-weight, callback and resume checks. Two small generic fixes ride along: `run()` no longer
+mutates the caller's `context_args` dict, and `approxfun.collect_exponents` builds its static index
+table with NumPy (required by jax >= 0.10).
+
 ## Installation
 
 PySAGES currently supports [HOOMD-blue](https://glotzerlab.engin.umich.edu/hoomd-blue),

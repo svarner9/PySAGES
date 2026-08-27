@@ -368,6 +368,7 @@ def _run(  # noqa: F811 # pylint: disable=C0116,E0102
     """
     timesteps = int(timesteps)
 
+    context_args = dict(context_args)  # never mutate the caller's (possibly default) dict
     sampling_context = SamplingContext(method, context_generator, callback, context_args)
     context_args["context"] = sampling_context.context
     sampler = sampling_context.sampler
@@ -396,6 +397,7 @@ def _run(  # noqa: F811 # pylint: disable=C0116,E0102
     method = result.method
     callback = result.callbacks
 
+    context_args = dict(context_args)  # never mutate the caller's (possibly default) dict
     sampling_context = SamplingContext(method, context_generator, callback, context_args)
     context_args["context"] = sampling_context.context
     sampler = sampling_context.sampler

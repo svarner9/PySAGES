@@ -42,6 +42,8 @@ class SamplingContext:
             self._backend_name = "openmm"
         elif isinstance(context, QboxContext):
             self._backend_name = "qbox"
+        elif module_name == "mlmd" or module_name.startswith("mlmd."):
+            self._backend_name = "mlmd"
 
         if self._backend_name is None:
             backends = ", ".join(supported_backends())
@@ -78,4 +80,4 @@ class SamplingContext:
 
 
 def supported_backends():
-    return ("ase", "hoomd", "ipi", "jax-md", "lammps", "openmm", "qbox")
+    return ("ase", "hoomd", "ipi", "jax-md", "lammps", "mlmd", "openmm", "qbox")

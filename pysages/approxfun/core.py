@@ -86,14 +86,18 @@ def collect_exponents(grid):
     #
     m = 1 - n if grid.is_periodic else 1
     pairs = product(range(1, n), range(m, n))
-    exponents = np.vstack(
+    # [PATCH jax>=0.10] upstream used jnp.vstack([list-of-tuples]); jax>=0.10 rejects that. These
+    # exponents are STATIC integers, so build them with numpy (host) then convert to jax once below.
+    import numpy as _onp
+    exponents = _onp.vstack(
         [
-            [(0, i) for i in range(1, n)],
-            [(i, 0) for i in range(1, n)],
-            [t for t in pairs if t[1] != 0 and t[0] ** 2 + t[1] ** 2 <= r],
+            _onp.array([(0, i) for i in range(1, n)], dtype=int).reshape(-1, 2),
+            _onp.array([(i, 0) for i in range(1, n)], dtype=int).reshape(-1, 2),
+            _onp.array([t for t in pairs if t[1] != 0 and t[0] ** 2 + t[1] ** 2 <= r],
+                       dtype=int).reshape(-1, 2),
         ]
     )
-    return exponents
+    return np.asarray(exponents)
 
 
 def scale(x, grid: Grid):
