@@ -43,7 +43,8 @@ an extensible framework to compute collective variables and to perform enhanced-
 MD simulations to discover reaction pathways and estimate free energies. Most research
 objectives are achievable by using these implemented collective variables and methods.
 PySAGES currently supports automatically connecting these methods to [ASE], [HOOMD-blue],
-[LAMMPS], and [OpenMM]. PySAGES communicates with these backends without copying data
+[LAMMPS], [OpenMM], and (in this fork) [mlmd], a JAX engine for machine-learning potentials whose
+biased step is compiled together with the sampling method. PySAGES communicates with these backends without copying data
 between GPU and host memory, except for ASE, which does not support GPU calculations
 directly. This approach allows biased simulations without slowing the backend simulation
 engines down. PySAGES still implements all methods and collective variables in pure python
@@ -76,3 +77,4 @@ package-pysages
 [HOOMD-blue]: https://glotzerlab.engin.umich.edu/hoomd-blue
 [LAMMPS]: https://www.lammps.org
 [OpenMM]: https://openmm.org
+[mlmd]: ../../examples/mlmd/README.md
