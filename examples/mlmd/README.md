@@ -18,7 +18,7 @@ result = pysages.run(method, generate_context, 200_000, callback=log_cvs, stride
 ```
 
 Anything attached to the dynamics (`Trajectory`, `Logger`) still gets written, and any calculator
-mlmd accepts works: MACE, Lennard-Jones, an analytic surface, your own JAX potential. `stride` is
+mlmd accepts works: MACE, MACE-LES (long-range electrostatics), Lennard-Jones, an analytic surface, your own JAX potential. `stride` is
 how often, in MD steps, the callback is called.
 
 Two examples, each with its own README:
