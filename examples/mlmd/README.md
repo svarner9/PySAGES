@@ -30,11 +30,13 @@ invoked; `frames_per_chunk` (default 10) how many such frames are batched per de
 
 | example | what it shows | needs |
 |---|---|---|
-| `muller_brown/` | SpectralABF on an analytic 2-D surface: the complete pattern in 60 lines, CPU, seconds | jax, mlmd, pysages |
-| `alanine_dipeptide/` | φ/ψ SpectralABF of alanine dipeptide with MACE-OFF23, trajectory output, resumable | + the MACE stack (`mlmd/install.sh`) and a GPU |
+| `muller_brown/` | SpectralABF on an analytic 2-D surface: the complete pattern on one screen, CPU, a minute | jax, mlmd, pysages |
+| `alanine_dipeptide/` | φ/ψ SpectralABF of alanine dipeptide with MACE-OFF23, trajectory + log output | + the MACE stack (`mlmd/install.sh`) and a GPU |
 
-Run them with `python muller_brown/run.py` (or on the cluster
-`MLMD_PYSAGES=/path/to/this/checkout /path/to/mlmd/env/mlmd.sh python muller_brown/run.py`).
+Run them from their own directory: `cd muller_brown && python run.py` (on the cluster:
+`MLMD_PYSAGES=/path/to/this/checkout /path/to/mlmd/env/mlmd.sh python run.py`). Settings are the
+constants at the top of each script. To continue a run later, `pysages.save(result, "result.pickle")`
+and then `pysages.run(pysages.load("result.pickle"), generate_context, more_steps)`.
 
 ## Checked against the ASE backend
 
