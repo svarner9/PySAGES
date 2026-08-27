@@ -77,4 +77,4 @@ package-pysages
 [HOOMD-blue]: https://glotzerlab.engin.umich.edu/hoomd-blue
 [LAMMPS]: https://www.lammps.org
 [OpenMM]: https://openmm.org
-[mlmd]: ../../examples/mlmd/README.md
+[mlmd]: https://github.com/svarner9/mlmd

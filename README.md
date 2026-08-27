@@ -33,7 +33,7 @@ implementation of [SSAGES](https://ssagesproject.github.io) with support for GPU
 
 ## This fork: the `mlmd` backend
 
-This branch adds a backend for [mlmd](https://github.com/...) — molecular dynamics with JAX
+This branch adds a backend for [mlmd](https://github.com/svarner9/mlmd) — molecular dynamics with JAX
 machine-learning potentials — in `pysages/backends/mlmd.py`. `generate_context()` returns an
 `mlmd.Langevin`/`VelocityVerlet` object and the whole biased step (potential, collective variables,
 bias, integrator) runs as one compiled JAX program, so enhanced sampling costs about as much as
