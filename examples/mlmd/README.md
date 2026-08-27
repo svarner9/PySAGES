@@ -35,3 +35,13 @@ invoked; `frames_per_chunk` (default 10) how many such frames are batched per de
 
 Run them with `python muller_brown/run.py` (or on the cluster
 `MLMD_PYSAGES=/path/to/this/checkout /path/to/mlmd/env/mlmd.sh python muller_brown/run.py`).
+
+## Checked against the ASE backend
+
+`alanine_dipeptide/run.py` for 1 M steps (MACE-OFF23-small, 1 fs, 300 K) reproduces the φ/ψ
+free-energy surface of a 1 M-step PySAGES + ASE + mace-torch run of the same system: RMSD 1.8 kT and
+Pearson r = 0.96 over the well-sampled region, with the C7eq, C5 and αR minima at the same
+positions to within 0.2 rad and 0.6 kT (the remaining difference is the usual ABF extrapolation into
+unsampled regions plus the finite sampling of both runs). Wall time: 22 minutes on an RTX PRO 6000
+including model loading and compilation, versus ~3 hours for the ASE reference on an L40S. The
+exact bias-weight test lives in `tests/test_mlmd_backend.py`.
