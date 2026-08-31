@@ -196,6 +196,15 @@ def build_runner(dynamics, sampler):
 def bind(sampling_context: SamplingContext, callback: Callable, **kwargs):
     dynamics = sampling_context.context
     sampling_method = sampling_context.method
+    from mlmd import NPT
+
+    if isinstance(dynamics, NPT):
+        raise ValueError(
+            "PySAGES + mlmd NPT is not supported: the bias force carries no virial, so the "
+            "barostat would see the biased forces but an unbiased stress and sample a subtly "
+            "wrong ensemble. Run the biased sampling at constant volume (Langevin), or ask for "
+            "biased-NPT support explicitly."
+        )
     dynamics.prepare()
     if dynamics.nsteps == 0:                     # like mlmd's own run(): observers see the initial frame
         dynamics.fire_observers(dynamics.current_frame())
