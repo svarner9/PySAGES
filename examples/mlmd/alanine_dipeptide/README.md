@@ -28,7 +28,10 @@ steps) and fes.dat (phi, psi, free energy in eV, min-subtracted).
 
 After 200k steps the surface already shows the usual alanine dipeptide basins. In our runs the
 minimum is C7eq at about phi = -1.5, psi = 1.3 (radians), with C5 near (-2.7, 2.9) at ~1 kT and the
-alpha-R region near (-1.5, 0.6) at ~2 kT. The printed free-energy range is around 30 kT. A 1M step
+alpha-R region near (-1.5, 0.6) at ~2 kT. The printed free-energy range (max minus min over the
+whole grid) is noisy at 200k steps — anywhere from ~15 to ~30 kT depending on how far ABF's
+extrapolation reaches into unsampled corners; the basin locations and depths are the stable
+part. A 1M step
 run of this script matches a 1M step PySAGES + ASE + mace-torch run of the same system to about
 2 kT RMSD over the sampled region, with the same minima.
 
