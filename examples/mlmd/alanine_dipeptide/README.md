@@ -1,6 +1,6 @@
 # Alanine dipeptide with MACE and ABF
 
-The real thing: a MACE-OFF23 potential, deuterated alanine dipeptide in vacuum, SpectralABF over
+A MACE-OFF23 potential, deuterated alanine dipeptide in vacuum, SpectralABF over
 the backbone dihedrals phi and psi. Needs the MACE stack (see mlmd's install.sh) and a GPU;
 200k steps take a few minutes on an L40S or better.
 
