@@ -20,6 +20,16 @@ the bias acts with full weight ``dt``, evaluated at one set of positions, exactl
 the force field. (Adding the bias *after* the step, as a naive adaptation of the jax-md backend would,
 gives it half weight and makes ABF's mean-force estimate converge to twice the true value.)
 
+Calculators that rebuild state per step
+---------------------------------------
+A calculator may need to rebuild a data structure from the current coordinates inside every step -- the
+MACE-FMM calculator rebuilds its fast-multipole partition that way, so the long-range interaction is
+never evaluated on a partition built for an older frame. Such a calculator exposes
+``pysages_in_step_refresh(positions)``; the runner then threads that calculator's own extra carry
+element through the compiled step alongside the sampling state, and reruns a chunk whose carry reports
+that the rebuild overflowed its capacities (the chunk ran on a truncated structure, so it is not a
+trajectory). Pass ``in_step_refresh=False`` to ``SamplingContext`` to hold the structure instead.
+
 Callbacks
 ---------
 The Python ``callback(snapshot, state, timestep)`` is called once per *frame* — every ``stride``
@@ -123,7 +133,7 @@ def build_helpers(context, sampling_method):
     return HelperMethods(build_data_querier(snapshot_methods, flags), dimensionality)
 
 
-def build_runner(dynamics, sampler):
+def build_runner(dynamics, sampler, refresher=None):
     from mlmd.runner import advance_state, frames_snapshot
 
     dt = dynamics.dt
@@ -131,10 +141,13 @@ def build_runner(dynamics, sampler):
     m = masses[:, None]
 
     def make_step():
-        integrator_step = dynamics.integrator_step   # rebuilt after a neighbor-list regrowth
+        # Both are rebuilt after a neighbor-list regrowth, which is why they are read here:
+        # ChunkRunner calls make_step again then.
+        integrator_step = dynamics.integrator_step if refresher is None else None
+        force_fn = None if refresher is None else refresher.force_fn(dynamics._nl)
 
         def step(carry):
-            state, snapshot, method_state = carry
+            state, snapshot, method_state = carry[:3]
             dtype = state.forces.dtype           # PySAGES works in float64; the MD state may be float32
             prev_bias = method_state.bias
             # The previous closing half-kick used the bare force, so half a kick of bias is owed.
@@ -152,18 +165,38 @@ def build_runner(dynamics, sampler):
                 half_kick = (0.5 * dt * bias / m).astype(dtype)
                 velocities = state.velocities + np.where(state.step > 0, half_kick, 0.0).astype(dtype)
                 forces = forces + bias.astype(dtype)
-            state = advance_state(state, integrator_step, velocities=velocities, forces=forces)
-            return state, snapshot, method_state
+            if refresher is None:
+                state = advance_state(state, integrator_step, velocities=velocities, forces=forces)
+                return state, snapshot, method_state
+            # The calculator rebuilds from the coordinates the step hands it and reports what its
+            # capacities had to hold; `holder` lifts that report back out of the force call.
+            extras = carry[3]
+            holder = []
+
+            def force(R, cell):
+                e, f, aux, extras_out = force_fn(R, cell, extras)
+                holder.append(extras_out)
+                return e, f, aux
+
+            state = advance_state(state, dynamics.make_step(force),
+                                  velocities=velocities, forces=forces)
+            return state, snapshot, method_state, holder[-1]
 
         return step
 
     def snapshot_fn(carry):
-        state, snapshot, method_state = carry
+        state, snapshot, method_state = carry[:3]
         return frames_snapshot(state, masses), snapshot, method_state
 
     runner = dynamics.make_runner(make_step, snapshot_fn)
 
     def run(timesteps, stride=None, frames_per_chunk=10, **kwargs):
+        nonlocal runner
+        if "in_step_refresh" in kwargs:
+            # It selects how the step is compiled, so it is decided at bind time; accepting it here
+            # would silently ignore it.
+            raise TypeError("in_step_refresh is a SamplingContext argument, not a run() argument: "
+                            "SamplingContext(method, context, in_step_refresh=False)")
         timesteps = int(timesteps)
         if stride is None:
             intervals = [interval for _, interval in dynamics.observers]
@@ -175,7 +208,21 @@ def build_runner(dynamics, sampler):
             remaining = target - dynamics.nsteps
             n_frames = min(frames_per_chunk, remaining // stride) if remaining >= stride else 0
             this_stride = stride if n_frames > 0 else remaining
-            carry, (frames, snapshots, states) = runner.advance(carry, this_stride, max(n_frames, 1))
+            if refresher is None:
+                carry, (frames, snapshots, states) = runner.advance(
+                    carry, this_stride, max(n_frames, 1))
+            else:
+                # `fresh()` is re-read on every attempt: a growth moves the capacities it reports.
+                start = carry[:3] + (refresher.fresh(),)
+                while True:
+                    carry, (frames, snapshots, states) = runner.advance(
+                        start, this_stride, max(n_frames, 1))
+                    if not refresher.overflowed(carry[3]):
+                        break
+                    refresher.grow(carry[3])
+                    runner = dynamics.make_runner(make_step, snapshot_fn)
+                    run.runner = runner
+                    start = start[:3] + (refresher.fresh(),)
             dynamics.state = carry[0]
             sampler.snapshot, sampler.state = carry[1], carry[2]
             for k, frame in enumerate(dynamics.frames_to_host(frames)):
@@ -208,9 +255,15 @@ def bind(sampling_context: SamplingContext, callback: Callable, **kwargs):
     dynamics.prepare()
     if dynamics.nsteps == 0:                     # like mlmd's own run(): observers see the initial frame
         dynamics.fire_observers(dynamics.current_frame())
+    refresher = None
+    if kwargs.get("in_step_refresh", True):
+        factory = getattr(dynamics.system.calculator, "pysages_in_step_refresh", None)
+        if factory is not None:
+            refresher = factory(dynamics.state.positions)
     snapshot = take_snapshot(dynamics)
     helpers = build_helpers(dynamics, sampling_method)
     method_bundle = sampling_method.build(snapshot, helpers)
     sampler = Sampler(method_bundle, dynamics, callback)
-    sampling_context.run = build_runner(dynamics, sampler)
+    sampling_context.run = build_runner(dynamics, sampler, refresher)
+    sampler.refresher = refresher
     return sampler
