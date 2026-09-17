@@ -12,6 +12,7 @@ PySAGES with your own.
 
 from .angles import Angle, DihedralAngle
 from .coordinates import Component, Displacement, Distance
+from .nematic import NematicOrderParameter
 from .shape import (
     Acylindricity,
     Asphericity,
