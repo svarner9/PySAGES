@@ -9,6 +9,7 @@ mlmd = pytest.importorskip("mlmd")
 
 import pysages  # noqa: E402
 from pysages.colvars import Component  # noqa: E402
+from pysages.backends.core import SamplingContext  # noqa: E402
 from pysages.methods import HarmonicBias, SpectralABF  # noqa: E402
 
 from mlmd import Langevin, System, units  # noqa: E402
@@ -171,3 +172,25 @@ def test_npt_is_rejected():
     method = HarmonicBias([Component([0], 0)], kspring=1.0, center=[0.0])
     with pytest.raises(ValueError, match="NPT"):
         pysages.run(method, lambda: dyn, 100)
+
+
+def test_observers_fire_when_the_run_does_not_start_on_a_stride_boundary():
+    """mlmd fires an observer only when `frame.step % interval` is zero. A run that starts at an
+    unaligned step -- which is what any preceding odd number of steps leaves, e.g. the one-step
+    pre-flight a production driver does to fail fast -- would put every frame off the boundary and
+    silence the observers for its whole length. The first chunk is shortened to land on the next
+    absolute multiple instead."""
+    dyn = harmonic_particles(8, 2.0, 4.0)
+    frames = []
+    dyn.attach(lambda frame: frames.append(frame.step), interval=50)
+    method = HarmonicBias([Component([0], 0)], kspring=1.0, center=[0.0])
+    log = CVLog()
+    context = SamplingContext(method, lambda: dyn, log)
+
+    context.run(1, stride=1, frames_per_chunk=1)        # the pre-flight: leaves nsteps == 1
+    assert dyn.nsteps == 1
+    context.run(399, frames_per_chunk=3)                # stride defaults to the observer interval
+
+    assert dyn.nsteps == 400
+    assert frames == [0, 50, 100, 150, 200, 250, 300, 350, 400]
+    assert log.steps[-1] == 400

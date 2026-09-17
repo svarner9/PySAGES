@@ -206,17 +206,26 @@ def build_runner(dynamics, sampler, refresher=None):
         target = dynamics.nsteps + timesteps
         while dynamics.nsteps < target:
             remaining = target - dynamics.nsteps
-            n_frames = min(frames_per_chunk, remaining // stride) if remaining >= stride else 0
-            this_stride = stride if n_frames > 0 else remaining
+            # Land on the next ABSOLUTE multiple of the stride, by shortening the first chunk if
+            # the run does not start on one. mlmd fires an observer only when `frame.step % interval`
+            # is zero, so frames offset from the boundary -- which is what a preceding odd number of
+            # steps leaves, e.g. a one-step pre-flight -- match no interval at all and the observers
+            # stay silent for the whole run.
+            to_boundary = stride - dynamics.nsteps % stride
+            if to_boundary != stride or remaining < stride:
+                this_stride, n_frames = min(remaining, to_boundary), 1
+            else:
+                n_frames = min(frames_per_chunk, remaining // stride)
+                this_stride = stride
             if refresher is None:
                 carry, (frames, snapshots, states) = runner.advance(
-                    carry, this_stride, max(n_frames, 1))
+                    carry, this_stride, n_frames)
             else:
                 # `fresh()` is re-read on every attempt: a growth moves the capacities it reports.
                 start = carry[:3] + (refresher.fresh(),)
                 while True:
                     carry, (frames, snapshots, states) = runner.advance(
-                        start, this_stride, max(n_frames, 1))
+                        start, this_stride, n_frames)
                     if not refresher.overflowed(carry[3]):
                         break
                     refresher.grow(carry[3])
