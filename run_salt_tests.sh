@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Run this worktree's autoionization-CV tests (task T1, SALT/plan/PAPER_PLAN.md)
-# on CPU, with a fixed, persistent interpreter -- not a session-scoped temp venv.
+# Run this worktree's autoionization-CV tests (task T1, SALT/plan/PAPER_PLAN.md) and
+# MetaDSpectralABF / Tq / AuxiliaryWall / mlmd-backend-resume tests (task T2,
+# SALT/plan/metad_sabf_design.md) on CPU, with a fixed, persistent interpreter -- not a
+# session-scoped temp venv.
+#
+# By default this skips tests marked `slow` (the 1D/2D toy convergence runs in
+# tests/test_metad_sabf.py, ~15-40s each) to keep the default runtime reasonable; pass
+# `-m slow` as an extra arg to run only those, or `-m ""` to run everything.
 #
 # Interpreter: /scratch/slv5250/tmp/mlmd-clean-env, a persistent CPU-only venv
 # (jax/ase/mlmd already installed there for other mlmd work) that this script
@@ -34,4 +40,7 @@ fi
 
 cd "$HERE"
 export JAX_PLATFORMS=cpu
-exec "$PYTHON" -m pytest -q tests/test_autoion_cvs.py tests/test_cvs.py tests/test_nematic_cv.py "$@"
+exec "$PYTHON" -m pytest -q -m "not slow" \
+    tests/test_autoion_cvs.py tests/test_cvs.py tests/test_nematic_cv.py \
+    tests/test_metad_sabf.py tests/test_tq_and_aux_wall.py tests/test_mlmd_backend.py \
+    "$@"

@@ -61,6 +61,7 @@ to sample multiple replicas along a path to estimate free energy differences.
 
 from .abf import ABF
 from .ann import ANN
+from .aux_restraint import AuxiliaryWall
 from .bias import Bias
 from .cff import CFF
 from .core import SamplingMethod
@@ -68,6 +69,7 @@ from .ffs import FFS
 from .funn import FUNN
 from .harmonic_bias import HarmonicBias
 from .metad import Metadynamics
+from .metad_sabf import MetaDSpectralABF
 from .restraints import CVRestraints
 from .sirens import Sirens
 from .spectral_abf import SpectralABF

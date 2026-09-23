@@ -108,6 +108,25 @@ METHODS_ARGS = {
         "centers": [0.0, 0.7],
         "hist_periods": 10,
     },
+    "MetaDSpectralABF": {
+        "cvs": [pysages.colvars.Component([0], 0)],
+        "grid": pysages.Grid(lower=(-pi,), upper=(pi,), shape=(32,)),
+        "height": 0.01,
+        "sigma": 0.1,
+        "stride": 10,
+        "ngaussians": 50,
+        "deltaT": 1200.0,
+        "kB": 8.617333262e-5,
+    },
+    "AuxiliaryWall": {
+        "method": pysages.methods.HarmonicBias(
+            [pysages.colvars.Component([0], 0)], kspring=15.0, center=0.7
+        ),
+        "aux_cv": pysages.colvars.Component([1], 0),
+        "threshold": 2.2,
+        "k": 100 / 96.485,
+        "side": "upper",
+    },
 }
 
 
@@ -156,6 +175,9 @@ COLVAR_ARGS = {
         # ),
         "fractional_coords": True,
     },
+    "CVDist": {"indices": [[0, 1], [2, 3]], "cell": 10.0 * np.eye(3)},
+    "CVNum": {"indices": [[0, 1], [2, 3]], "cell": 10.0 * np.eye(3)},
+    "Tq": {"indices": [[0, 1], [2, 3]], "cell": 10.0 * np.eye(3)},
 }
 
 

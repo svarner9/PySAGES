@@ -9,6 +9,9 @@ requires = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "slow: long-running toy/convergence tests (run once; read the printed numbers rather than treating pass/fail as a tight fit gate).",
+]
 
 [tool.setuptools_scm]
 write_to = "pysages/_version.py"
