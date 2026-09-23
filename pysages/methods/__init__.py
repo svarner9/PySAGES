@@ -67,6 +67,13 @@ from .cff import CFF
 from .core import SamplingMethod
 from .ffs import FFS
 from .funn import FUNN
+from .funnel_metad_sabf import (
+    Funnel_MetaDSpectralABF,
+    calibrate_tq_threshold,
+    tq_baseline,
+    tq_threshold_from_baseline,
+    tq_upper_wall,
+)
 from .harmonic_bias import HarmonicBias
 from .metad import Metadynamics
 from .metad_sabf import MetaDSpectralABF

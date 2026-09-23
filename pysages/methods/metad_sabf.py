@@ -620,6 +620,64 @@ def build_metad_interpolator(metad_grid):
     return interp
 
 
+def _masked_refit(method, n_min, hist_prod, Fsum_prod):
+    """
+    Spectral refit of ``Fsum_prod / max(hist_prod, 1)`` (undamped production mean force) at
+    analysis time, masking out bins with ``hist_prod < n_min`` from the least-squares solve.
+
+    Factored out of ``analyze(Result[MetaDSpectralABF])`` (memo Sec. 4) so that
+    `pysages.methods.funnel_metad_sabf` can reuse it verbatim on other per-bin force arrays of
+    the same shape (``Frestr_prod``, or ``Fsum_prod + Frestr_prod``) with the same method/grid,
+    rather than re-implementing the masked lstsq machinery.
+    """
+    model = method.model
+    dims = method.grid.shape.size
+    shape = (*Fsum_prod.shape[:-1], 1)
+    mean_force = _onp.asarray(Fsum_prod / np.maximum(hist_prod.reshape(shape), 1))
+    mean_force = mean_force.reshape(-1)
+    A = vandergrad_builder(model.grid, model.exponents)(model.mesh)
+    if model.is_periodic:
+        A = np.hstack((np.imag(A), np.real(A)))
+    A = _onp.asarray(A)
+    point_mask = _onp.asarray(hist_prod).reshape(-1) >= n_min
+    row_mask = _onp.repeat(point_mask, dims)
+    if row_mask.sum() < A.shape[1]:  # not enough visited bins for a well-posed solve
+        row_mask = _onp.ones_like(row_mask, dtype=bool)
+    A_m, y_m = A[row_mask], mean_force[row_mask]
+    std = float(_onp.std(y_m))
+    std = 1.0 if std == 0 else std
+    coeffs, *_ = _onp.linalg.lstsq(A_m, y_m / std, rcond=None)
+    return Fun(np.asarray(std), np.asarray(coeffs), np.array(0.0))
+
+
+def _build_fes_fn(method, fun):
+    """``x -> A.max() - A`` from a `Fun` evaluated with ``method.model``; factored out of
+    ``analyze(Result[MetaDSpectralABF])`` for reuse (see ``_masked_refit``)."""
+    evaluate = build_evaluator(method.model)
+
+    def fes_fn(x):
+        A = evaluate(fun, x)
+        return A.max() - A
+
+    return jit(fes_fn)
+
+
+def _free_energy_trapz(mesh_1d, mean_force_1d):
+    """1D direct cumulative-trapezoid integral of a mean force along ``mesh_1d``; robust at a
+    sharp onset (e.g. the CVDist W1 floor) where the global spectral fit can smooth over the
+    sharpest bins. Factored out of ``analyze(Result[MetaDSpectralABF])`` for reuse."""
+    x = _onp.asarray(mesh_1d).reshape(-1)
+    mf = _onp.asarray(mean_force_1d).reshape(-1)
+    order = _onp.argsort(x)
+    xs, mfs = x[order], mf[order]
+    avg = 0.5 * (mfs[1:] + mfs[:-1])
+    f_hat_sorted = _onp.concatenate(([0.0], _onp.cumsum(avg * _onp.diff(xs))))
+    fes_sorted = f_hat_sorted.max() - f_hat_sorted
+    fes = _onp.empty_like(fes_sorted)
+    fes[order] = fes_sorted
+    return fes
+
+
 @dispatch
 def analyze(result: Result[MetaDSpectralABF], **kwargs):
     """
@@ -669,6 +727,15 @@ def analyze(result: Result[MetaDSpectralABF], **kwargs):
 
     NOTE: for multiple-replica runs every key holds a list (one item per replica).
     """
+    return _analyze_metad_sabf(result, **kwargs)
+
+
+def _analyze_metad_sabf(result, **kwargs):
+    """Body of ``analyze(Result[MetaDSpectralABF])``, factored out (unchanged behavior) so
+    ``pysages.methods.funnel_metad_sabf`` can call it directly to get "everything
+    `MetaDSpectralABF` returns" without going through `Result` covariant dispatch a second time
+    (which, for a `Funnel_MetaDSpectralABF` result, would just call the funnel `analyze`
+    override right back -- see that module's own `analyze`)."""
     method = result.method
     grid = method.grid
     metad_grid = method.metad_grid
@@ -676,46 +743,7 @@ def analyze(result: Result[MetaDSpectralABF], **kwargs):
     n_min = kwargs.get("n_min", int(method.fit_min_count))
 
     mesh = compute_mesh(grid)
-    evaluate = build_evaluator(method.model)
     interp_field = build_metad_interpolator(metad_grid)
-
-    def build_fes_fn(fun):
-        def fes_fn(x):
-            A = evaluate(fun, x)
-            return A.max() - A
-
-        return jit(fes_fn)
-
-    def masked_refit(hist_prod, Fsum_prod):
-        model = method.model
-        shape = (*Fsum_prod.shape[:-1], 1)
-        mean_force = _onp.asarray(Fsum_prod / np.maximum(hist_prod.reshape(shape), 1))
-        mean_force = mean_force.reshape(-1)
-        A = vandergrad_builder(model.grid, model.exponents)(model.mesh)
-        if model.is_periodic:
-            A = np.hstack((np.imag(A), np.real(A)))
-        A = _onp.asarray(A)
-        point_mask = _onp.asarray(hist_prod).reshape(-1) >= n_min
-        row_mask = _onp.repeat(point_mask, dims)
-        if row_mask.sum() < A.shape[1]:  # not enough visited bins for a well-posed solve
-            row_mask = _onp.ones_like(row_mask, dtype=bool)
-        A_m, y_m = A[row_mask], mean_force[row_mask]
-        std = float(_onp.std(y_m))
-        std = 1.0 if std == 0 else std
-        coeffs, *_ = _onp.linalg.lstsq(A_m, y_m / std, rcond=None)
-        return Fun(np.asarray(std), np.asarray(coeffs), np.array(0.0))
-
-    def free_energy_trapz(mesh_1d, mean_force_1d):
-        x = _onp.asarray(mesh_1d).reshape(-1)
-        mf = _onp.asarray(mean_force_1d).reshape(-1)
-        order = _onp.argsort(x)
-        xs, mfs = x[order], mf[order]
-        avg = 0.5 * (mfs[1:] + mfs[:-1])
-        f_hat_sorted = _onp.concatenate(([0.0], _onp.cumsum(avg * _onp.diff(xs))))
-        fes_sorted = f_hat_sorted.max() - f_hat_sorted
-        fes = _onp.empty_like(fes_sorted)
-        fes[order] = fes_sorted
-        return fes
 
     hists, mean_forces, free_energies, funs, fes_fns = [], [], [], [], []
     trapz_fess, metad_potentials, heights_all, n_clipped_all = [], [], [], []
@@ -724,8 +752,8 @@ def analyze(result: Result[MetaDSpectralABF], **kwargs):
     d = mesh.shape[-1]
 
     for s in result.states:
-        fun = masked_refit(s.hist_prod, s.Fsum_prod)
-        fes_fn = build_fes_fn(fun)
+        fun = _masked_refit(method, n_min, s.hist_prod, s.Fsum_prod)
+        fes_fn = _build_fes_fn(method, fun)
         mean_force = s.Fsum_prod / np.maximum(
             np.expand_dims(s.hist_prod, s.hist_prod.ndim), 1
         )
@@ -735,7 +763,7 @@ def analyze(result: Result[MetaDSpectralABF], **kwargs):
         funs.append(fun)
         fes_fns.append(fes_fn)
         if dims == 1:
-            trapz_fess.append(free_energy_trapz(mesh, mean_force))
+            trapz_fess.append(_free_energy_trapz(mesh, mean_force))
         else:
             trapz_fess.append(None)
         v_on_mesh = np.array([interp_field(s.V_G, x) for x in mesh])
