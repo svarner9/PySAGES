@@ -65,15 +65,34 @@ class Sampler:
         self.update = method_update
 
     def restore(self, prev_snapshot):
-        """Resume: put the saved positions/velocities/forces back into the dynamics."""
+        """Resume: put the saved positions/velocities/forces back into the dynamics, plus the
+        step counter and PRNG base key (carried in ``prev_snapshot.extras``, see
+        ``take_snapshot``/``update_snapshot`` below).
+
+        Without this, a resumed run always starts its underlying ``mlmd`` ``State.step`` back
+        at 0: the step's PRNG key is ``fold_in(base_key, step)`` (mlmd/runner.py), so the
+        resumed segment silently *repeats* the first segment's noise sequence instead of
+        continuing it, and the owed bias half-kick in ``build_runner.step`` (gated on
+        ``state.step > 0``) is skipped on the very first resumed step even though a bias was
+        in effect when the run was checkpointed. Restoring ``step``/``key`` here makes both
+        exact: `fold_in` reproduces the same key it would have on an uninterrupted run, and the
+        half-kick fires immediately, exactly as T2's design memo (Sec. 5, "Backend blocker for
+        restart bit-exact") requires for a bit-exact resumed, biased trajectory on CPU.
+        """
         self.snapshot = prev_snapshot
         velocities, _ = prev_snapshot.vel_mass
         state = self.dynamics.state
-        self.dynamics.state = state._replace(
+        replacements = dict(
             positions=np.asarray(prev_snapshot.positions, state.positions.dtype),
             velocities=np.asarray(velocities, state.velocities.dtype),
             forces=np.asarray(prev_snapshot.forces, state.forces.dtype),
         )
+        extras = prev_snapshot.extras or {}
+        if "step" in extras:
+            replacements["step"] = np.asarray(extras["step"], state.step.dtype)
+        if "key" in extras:
+            replacements["key"] = np.asarray(extras["key"], state.key.dtype)
+        self.dynamics.state = state._replace(**replacements)
 
     def take_snapshot(self):
         return copy(self.snapshot)
@@ -86,7 +105,12 @@ def _pysages_dtype():
 
 
 def take_snapshot(dynamics):
-    """Snapshot of the dynamics' current device state (velocities, not momenta, in ``vel_mass``)."""
+    """Snapshot of the dynamics' current device state (velocities, not momenta, in ``vel_mass``).
+
+    ``extras`` carries the mlmd ``State.step``/``.key`` alongside the usual
+    positions/velocities/forces, purely so a later ``Sampler.restore`` (resume) can put them
+    back -- see the docstring there. Nothing else reads ``extras`` on this backend.
+    """
     dtype = _pysages_dtype()
     state = dynamics.state
     system = dynamics.system
@@ -94,16 +118,19 @@ def take_snapshot(dynamics):
     ids = np.arange(system.n_atoms)
     cell = np.eye(3) if system.cell is None else np.asarray(system.cell)
     box = Box(cell, (0.0, 0.0, 0.0))
+    extras = {"step": state.step, "key": state.key}
     return Snapshot(state.positions.astype(dtype), (state.velocities.astype(dtype), masses),
-                    state.forces.astype(dtype), ids, box, dynamics.dt)
+                    state.forces.astype(dtype), ids, box, dynamics.dt, extras)
 
 
 def update_snapshot(snapshot, state, velocities):
     dtype = _pysages_dtype()
     _, masses = snapshot.vel_mass
+    extras = {"step": state.step, "key": state.key}
     return snapshot._replace(positions=state.positions.astype(dtype),
                              vel_mass=(velocities.astype(dtype), masses),
-                             forces=state.forces.astype(dtype))
+                             forces=state.forces.astype(dtype),
+                             extras=extras)
 
 
 def build_snapshot_methods(context, sampling_method):
