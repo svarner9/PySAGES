@@ -2,7 +2,7 @@
 # See LICENSE.md and CONTRIBUTORS.md at https://github.com/SSAGESLabs/PySAGES
 
 """
-Autoionization collective variables for water: ``CVNum`` and ``CVDist``.
+Autoionization collective variables for water: ``CVNum``, ``CVDist``, and ``Tq``.
 
 Both drive water self-dissociation / recombination (H2O + H2O <-> H3O+ + OH-)
 in a box of water (optionally with dissolved salt ions, which are excluded
@@ -145,6 +145,9 @@ DEFAULT_CLIP = 3.5
 DEFAULT_POWERS = (16, 56)
 # lambda: per-H softmax sharpness over oxygens (1/Å).
 DEFAULT_LAMBDA = 8.0
+# c: regularizer under the sqrt in Tq = sum_o sqrt(q_o**2 + c) (Calegari Andrade et al.,
+# PNAS 2023, Eq. 4), keeping the |q| kink at q=0 smooth/differentiable.
+DEFAULT_TQ_C = 0.01
 
 
 def minimum_image_vectors(p1, p2, cell):
@@ -229,10 +232,7 @@ def cv_num_value(
 
 def cv_dist_value(p_oxygen, p_hydrogen, cell, lam=DEFAULT_LAMBDA):
     """CVDist = -sum_{i<k} q_i q_k r_OO(i, k); see the module docstring."""
-    r_oh = minimum_image_distances(p_oxygen, p_hydrogen, cell)  # (n_O, n_H)
-    exp_oh = np.exp(-lam * r_oh)
-    sum_over_oxygens = np.sum(exp_oh, axis=0)  # (n_H,), per-H normalization
-    qi = np.sum(exp_oh / sum_over_oxygens[None, :], axis=1) - 2.0  # (n_O,)
+    qi = _charge_deficits(p_oxygen, p_hydrogen, cell, lam)  # (n_O,)
 
     r_oo = _self_distances(p_oxygen, cell)  # (n_O, n_O), exact zero diagonal
     qi_outer = qi[:, None] * qi[None, :]
@@ -240,6 +240,29 @@ def cv_dist_value(p_oxygen, p_hydrogen, cell, lam=DEFAULT_LAMBDA):
     # exactly zero, and off-diagonal terms are pairwise equal), matching
     # `cvDistCollectiveVariableGem.py`'s `sum(...) / 2` exactly.
     return -0.5 * np.sum(qi_outer * r_oo)
+
+
+def _charge_deficits(p_oxygen, p_hydrogen, cell, lam=DEFAULT_LAMBDA):
+    """Per-oxygen smooth Grifoni charge ``q_i`` (shared by ``CVDist`` and ``Tq``, see the
+    ``Tq`` docstring below); ``cell`` only enters through the O-H minimum-image distances."""
+    r_oh = minimum_image_distances(p_oxygen, p_hydrogen, cell)  # (n_O, n_H)
+    exp_oh = np.exp(-lam * r_oh)
+    sum_over_oxygens = np.sum(exp_oh, axis=0)  # (n_H,), per-H normalization
+    return np.sum(exp_oh / sum_over_oxygens[None, :], axis=1) - 2.0  # (n_O,)
+
+
+def tq_value(p_oxygen, p_hydrogen, cell, lam=DEFAULT_LAMBDA, c=DEFAULT_TQ_C):
+    """
+    ``Tq = sum_o sqrt(q_o**2 + c)``, a smooth surrogate for ``sum_o |q_o|`` built from the same
+    per-oxygen Grifoni charges ``q_o`` as ``CVDist`` (Calegari Andrade, Prendergast et al.,
+    PNAS 2023, Eq. 4). ``Tq ~= 2`` when a single H3O+/OH- pair is well separated (one oxygen at
+    ``q ~= +1``, one at ``q ~= -1``, each contributing ``sqrt(1 + c) ~= 1``) plus a small
+    ``N_O * sqrt(c)`` baseline from the remaining intact-water oxygens (``q ~= 0``); it stays
+    small (``~= N_O * sqrt(c)``) when the box is fully associated. ``c`` regularizes the
+    ``|x|`` kink at ``q = 0`` so the gradient stays finite and JIT-differentiable everywhere.
+    """
+    qi = _charge_deficits(p_oxygen, p_hydrogen, cell, lam)
+    return np.sum(np.sqrt(qi**2 + c))
 
 
 def _water_groups(atoms):
@@ -350,3 +373,41 @@ class CVDist(_WaterAutoionizationCV):
     def function(self):
         cell, lam = self.cell, self.lam
         return lambda p1, p2: cv_dist_value(p1, p2, cell, lam)
+
+
+class Tq(_WaterAutoionizationCV):
+    """
+    Total autoionization order parameter ``Tq = sum_o sqrt(q_o**2 + c)``, built from the same
+    per-oxygen smooth Grifoni charges ``q_o`` as ``CVDist`` (Calegari Andrade, Prendergast
+    et al., PNAS 2023, Eq. 4). Unlike ``CVDist``, ``Tq`` does not weight by O-O distance, so it
+    is a *count*-like order parameter: ``Tq ~= 2`` whenever exactly one H3O+/OH- pair exists
+    anywhere in the box (regardless of how far apart the two ions are), plus a small
+    ``N_O * sqrt(c)`` baseline from the intact-water oxygens; ``Tq ~= 4`` for two independent
+    pairs, and so on. See :func:`tq_value` and the module docstring for the shared ``q_o``
+    definition.
+
+    Typical use (memo: SALT global-CV runs on CVDist/CVNum) is as an *auxiliary* CV that is
+    never itself gridded/biased/estimated by an ABF-family method, only restrained with a
+    one-sided (upper) harmonic wall placed just above 2, to keep a global-CV run in the
+    "exactly one ion pair" sector. See ``pysages.methods.aux_restraint.AuxiliaryWall`` for how
+    to attach such a wall to any `SamplingMethod` without adding a grid dimension for ``Tq``.
+
+    Parameters
+    ----------
+    indices: [oxygen_indices, hydrogen_indices]
+    cell: array-like, shape (3, 3) or (3,)
+    lam: float, default 8.0 (1/Å)
+        Softmax sharpness of each hydrogen's assignment over oxygens (shared with ``CVDist``).
+    c: float, default 0.01
+        Regularizer under the square root (see :func:`tq_value`).
+    """
+
+    def __init__(self, indices, cell, lam=DEFAULT_LAMBDA, c=DEFAULT_TQ_C):
+        super().__init__(indices, cell)
+        self.lam = float(lam)
+        self.c = float(c)
+
+    @property
+    def function(self):
+        cell, lam, c = self.cell, self.lam, self.c
+        return lambda p1, p2: tq_value(p1, p2, cell, lam, c)

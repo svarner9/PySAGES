@@ -11,7 +11,7 @@ PySAGES with your own.
 """
 
 from .angles import Angle, DihedralAngle
-from .autoionization import CVDist, CVNum
+from .autoionization import CVDist, CVNum, Tq
 from .coordinates import Component, Displacement, Distance
 from .nematic import NematicOrderParameter
 from .shape import (
