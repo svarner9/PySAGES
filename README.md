@@ -42,6 +42,22 @@ bias-weight, callback and resume checks. Two small generic fixes ride along: `ru
 mutates the caller's `context_args` dict, and `approxfun.collect_exponents` builds its static index
 table with NumPy (required by jax >= 0.10).
 
+### Autoionization collective variables: `CVDist`, `CVNum`
+
+`pysages/colvars/autoionization.py` adds `CVDist` and `CVNum`, a versioned, tested port of the SALT
+project's water autoionization CVs (H2O + H2O <-> H3O+ + OH-): `CVNum = sum_O (n_i - 2)^2` (a
+coordination-defect sum, `n_i` a rational switching function of O-H distance) and
+`CVDist = -sum_{i<k} q_i q_k r_OO` (an environment-weighted O-O distance, `q_i` a per-hydrogen
+softmax charge over oxygens). Both take `[oxygen_indices, hydrogen_indices]` and a fixed cell
+(NVT only; see the module docstring); salt ions are simply left out of both index groups (or use
+`CVDist.from_atoms`/`CVNum.from_atoms` to derive the groups from an `ase.Atoms` frame automatically).
+Ported from `/scratch/slv5250/dpmd-ipi/PySAGES/pysages/colvars/{cvNumCollectiveVariableOld,
+cvDistCollectiveVariableGem}.py` (the classes `SALT/config_gen/run_biased_md.py` imports), hardened
+for float32 (the raw CVnum switching function overflows float32 past `r/R0 ~= 4.87`; see the module
+docstring for the clip and its (lack of) effect on the CV value). See `tests/test_autoion_cvs.py` for
+value/gradient parity against the reference implementations, float32-vs-float64 agreement, PBC
+invariance, and physical sanity checks (intact water, and a constructed H3O+/OH- pair).
+
 ## Installation
 
 PySAGES currently supports [HOOMD-blue](https://glotzerlab.engin.umich.edu/hoomd-blue),
