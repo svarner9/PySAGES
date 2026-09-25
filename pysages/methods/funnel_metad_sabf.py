@@ -523,7 +523,8 @@ def _analytic_one_pair_tq_increment(c=DEFAULT_TQ_C):
 # case (rare, ambiguous, Grotthuss-delocalized states exist on both sides) -- but
 # `tq_upper_wall` is a soft, one-sided harmonic RESTRAINT, not a hard classifier: occasionally
 # not fully suppressing an atypical, low-charge second pair is an acceptable, documented
-# limitation, not a design bug (see the module docstring, "Tq ~= 2/4 ... in general").
+# limitation, not a design bug (see `pysages.colvars.autoionization.Tq`'s docstring: "Tq ~= 2
+# ... Tq ~= 4 for two independent pairs, and so on" is itself only the idealized/typical case).
 MEASURED_ONE_PAIR_TQ_INCREMENT = _analytic_one_pair_tq_increment(DEFAULT_TQ_C)
 
 
