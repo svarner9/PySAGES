@@ -27,9 +27,22 @@ from jax import numpy as jnp
 from pysages.colvars import Component, Tq
 from pysages.colvars.autoionization import DEFAULT_LAMBDA, DEFAULT_TQ_C, tq_value
 from pysages.colvars.core import build
+from pysages.methods.funnel_metad_sabf import (
+    MEASURED_ONE_PAIR_TQ_INCREMENT,
+    calibrate_tq_threshold,
+    tq_baseline,
+    tq_single_pair_threshold,
+)
 from pysages.typing import JaxArray, NamedTuple
 
-from test_autoion_cvs import FRAMES_PATH, _cell, _groups, _make_isolated_pair  # noqa: E402
+from test_autoion_cvs import (  # noqa: E402
+    FRAMES_PATH,
+    _cell,
+    _discrete_ion_pair,
+    _groups,
+    _make_isolated_pair,
+    _make_two_isolated_pairs,
+)
 
 
 @pytest.fixture(scope="module")
@@ -142,6 +155,119 @@ def test_tq_isolated_ion_pair_is_near_two():
     baseline = p_o.shape[0] * onp.sqrt(DEFAULT_TQ_C)  # 2 oxygens here: 1 H3O+, 1 OH-
     print(f"[isolated pair] Tq={tq:.4f} (baseline for 2 oxygens: {baseline:.4f})")
     assert abs(tq - 2.0) < 0.3
+
+
+# --------------------------------------------------------------------------
+# tq_single_pair_threshold / calibrate_tq_threshold: the calibration-bug fix
+# (2026-09-25) -- see funnel_metad_sabf.py's "CALIBRATION BUG" module note.
+# The bug: the old calibrate_tq_threshold(tq_trajectory, percentile=99.9, margin=0.05),
+# calibrated on an UNBIASED intact-water trajectory, produced a threshold (51.350603 for 512
+# oxygens, see runs/stability_0925/tq_threshold.json) BELOW the Tq level of even a single
+# admitted ion pair -- it would forbid the very pair `tq_upper_wall` exists to admit. These
+# tests check the fix admits every single-pair fixture this test module has (the isolated
+# constructed pair at several separations, plus every real category-C/Cb frame with a clean
+# discrete single pair) and rejects a constructed two-pair frame; the old, un-migrated
+# `calibrate_tq_threshold` call signature (no `one_pair_increment`) must now raise instead of
+# silently returning an unsafe threshold.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("separation", [2.6, 3.0, 4.0, 5.0, 7.0, 9.0])
+def test_tq_single_pair_threshold_admits_isolated_pair_across_separations(separation):
+    p_o, p_h, cell = _make_isolated_pair(separation)
+    tq = float(tq_value(p_o, p_h, cell))
+    threshold = tq_single_pair_threshold(n_oxygen=p_o.shape[0])
+    print(f"[single-pair threshold, isolated] sep={separation:.2f} tq={tq:.4f} "
+          f"threshold={threshold:.4f}")
+    assert tq < threshold
+
+
+def test_tq_single_pair_threshold_admits_real_single_pair_frames(frames):
+    """Every real category-C/Cb frame in the cache that shows exactly one clean H3O+/OH- pair
+    under the discrete nearest-owner assignment (same rule as `salt_md.defects`, via
+    `_discrete_ion_pair`) must sit below `tq_single_pair_threshold` for that frame's oxygen
+    count -- the property the old, buggy calibration violated (see the module note above)."""
+    n_checked = 0
+    worst_margin = float("inf")
+    for atoms in frames:
+        if atoms.info.get("category") not in ("C", "Cb"):
+            continue
+        oxygen, hydrogen = _groups(atoms)
+        if _discrete_ion_pair(atoms, oxygen, hydrogen) is None:
+            continue
+        cell = jnp.asarray(_cell(atoms))
+        pos = onp.asarray(atoms.get_positions(), dtype=onp.float64)
+        p_o, p_h = jnp.asarray(pos[oxygen]), jnp.asarray(pos[hydrogen])
+        tq = float(tq_value(p_o, p_h, cell))
+        threshold = tq_single_pair_threshold(n_oxygen=len(oxygen))
+        margin = threshold - tq
+        worst_margin = min(worst_margin, margin)
+        salt = atoms.info.get("salt", "water")
+        print(f"[single-pair threshold, real] {atoms.info.get('frame_id')} salt={salt} "
+              f"tq={tq:.4f} threshold={threshold:.4f} margin={margin:.4f}")
+        assert tq < threshold, f"{atoms.info.get('frame_id')}: tq={tq} >= threshold={threshold}"
+        n_checked += 1
+    print(f"[single-pair threshold, real] checked {n_checked} frames, worst margin "
+          f"{worst_margin:.4f}")
+    assert n_checked >= 3, "expected several real single-clean-pair C/Cb frames in the cache"
+
+
+def test_tq_single_pair_threshold_rejects_constructed_two_pair_frame():
+    p_o, p_h, cell = _make_two_isolated_pairs(separation=5.0)
+    tq = float(tq_value(p_o, p_h, cell))
+    threshold = tq_single_pair_threshold(n_oxygen=p_o.shape[0])
+    print(f"[two-pair frame] tq={tq:.4f} threshold={threshold:.4f}")
+    assert tq > threshold
+
+
+def test_tq_single_pair_threshold_between_one_and_two_pair_levels():
+    """Directly checks the documented formula: threshold sits at the midpoint (default
+    margin=0.5) between baseline+increment and baseline+2*increment."""
+    n_oxygen = 512
+    threshold = tq_single_pair_threshold(n_oxygen)
+    baseline = tq_baseline(n_oxygen)
+    one_pair = baseline + MEASURED_ONE_PAIR_TQ_INCREMENT
+    two_pair = baseline + 2 * MEASURED_ONE_PAIR_TQ_INCREMENT
+    assert one_pair < threshold < two_pair
+    assert threshold == pytest.approx((one_pair + two_pair) / 2, rel=1e-12)
+
+
+def test_calibrate_tq_threshold_raises_without_one_pair_increment():
+    """The core bug fix: the old call signature (no `one_pair_increment`) must now be a hard
+    error, not a silently-too-low threshold (see the module's "CALIBRATION BUG" note)."""
+    trajectory = [51.213, 51.223, 51.227, 51.306]  # runs/stability_0925/tq_threshold.json-like
+    with pytest.raises(ValueError, match="one_pair_increment"):
+        calibrate_tq_threshold(trajectory)
+
+
+def test_calibrate_tq_threshold_with_increment_admits_a_real_single_pair_level(frames):
+    """With `one_pair_increment` supplied, `calibrate_tq_threshold` on the ACTUAL buggy
+    trajectory shape (unbiased 512-oxygen intact water, baseline ~51.2, spread ~51.21-51.31)
+    now produces a threshold safely above a real single-pair Tq level scaled to 512 oxygens --
+    the exact failure the old signature could not catch."""
+    tq_trajectory = [51.213006852516, 51.223060599990255, 51.30589324783915, 51.22797774142322]
+    threshold = calibrate_tq_threshold(tq_trajectory, MEASURED_ONE_PAIR_TQ_INCREMENT)
+    assert threshold > max(tq_trajectory) + MEASURED_ONE_PAIR_TQ_INCREMENT
+
+    # a real single-pair frame's Tq, rescaled from its own (small) box to 512 oxygens by
+    # keeping the same measured increment over an analytic 512-oxygen baseline, must sit below
+    # this empirically-calibrated threshold too.
+    real_single_pair = None
+    for atoms in frames:
+        if atoms.info.get("category") not in ("C", "Cb"):
+            continue
+        oxygen, hydrogen = _groups(atoms)
+        if _discrete_ion_pair(atoms, oxygen, hydrogen) is None:
+            continue
+        cell = jnp.asarray(_cell(atoms))
+        pos = onp.asarray(atoms.get_positions(), dtype=onp.float64)
+        p_o, p_h = jnp.asarray(pos[oxygen]), jnp.asarray(pos[hydrogen])
+        tq = float(tq_value(p_o, p_h, cell))
+        increment = tq - tq_baseline(len(oxygen))
+        real_single_pair = tq_baseline(512) + increment
+        break
+    assert real_single_pair is not None, "expected at least one real single-pair C/Cb frame"
+    assert real_single_pair < threshold
 
 
 # --------------------------------------------------------------------------

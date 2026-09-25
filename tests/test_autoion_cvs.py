@@ -133,6 +133,28 @@ def _make_isolated_pair(separation, box=30.0, bond_length=0.98):
     return jnp.asarray(p_o), jnp.asarray(p_h), jnp.asarray(cell)
 
 
+def _make_two_isolated_pairs(separation=5.0, pair_gap=15.0, box=40.0, bond_length=0.98):
+    """Two independent, well-separated H3O+/OH- pairs (4 oxygens total) in one large box, each
+    pair internally built exactly as :func:`_make_isolated_pair` -- a constructed two-simultaneous-
+    -pair frame, used (``tests/test_tq_and_aux_wall.py``) to check that `tq_single_pair_threshold`
+    rejects a genuine second pair rather than only ever being exercised on single-pair data."""
+    box_arr = onp.eye(3) * box
+    o_h3o = onp.array([box / 2, box / 2, box / 2])
+    directions = onp.array([[1, 0, 0.3], [-0.5, 0.87, 0.3], [-0.5, -0.87, 0.3]], dtype=float)
+    directions /= onp.linalg.norm(directions, axis=1, keepdims=True)
+    h3o_hydrogens = o_h3o + bond_length * directions
+    o_oh = o_h3o + onp.array([separation, 0.0, 0.0])
+    oh_direction = onp.array([1.0, 0.2, 0.0])
+    oh_direction /= onp.linalg.norm(oh_direction)
+    oh_hydrogen = o_oh + bond_length * oh_direction
+    p_o1 = onp.stack([o_h3o, o_oh])
+    p_h1 = onp.vstack([h3o_hydrogens, oh_hydrogen[None, :]])
+    shift = onp.array([0.0, pair_gap, 0.0])
+    p_o = onp.vstack([p_o1, p_o1 + shift])
+    p_h = onp.vstack([p_h1, p_h1 + shift])
+    return jnp.asarray(p_o), jnp.asarray(p_h), jnp.asarray(box_arr)
+
+
 @pytest.fixture(scope="module")
 def frames():
     if not FRAMES_PATH.exists():

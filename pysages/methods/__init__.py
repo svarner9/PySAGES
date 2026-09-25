@@ -68,9 +68,11 @@ from .core import SamplingMethod
 from .ffs import FFS
 from .funn import FUNN
 from .funnel_metad_sabf import (
+    MEASURED_ONE_PAIR_TQ_INCREMENT,
     Funnel_MetaDSpectralABF,
     calibrate_tq_threshold,
     tq_baseline,
+    tq_single_pair_threshold,
     tq_threshold_from_baseline,
     tq_upper_wall,
 )

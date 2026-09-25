@@ -433,32 +433,217 @@ def tq_threshold_from_baseline(n_oxygen, delta, c=DEFAULT_TQ_C):
     ``delta`` units of Tq above the fully-associated baseline. A well-separated single ion pair
     gives ``Tq ~= 2 + baseline`` (one oxygen at ``q ~= +1``, one at ``q ~= -1``); ``delta ~= 2``
     sits just above that, wide enough to let one pair form freely while still gating a second,
-    simultaneous pair (``Tq ~= 4 + baseline``).
+    simultaneous pair (``Tq ~= 4 + baseline``). See `tq_single_pair_threshold` for a version of
+    this same idea that derives ``delta`` from a measured single-pair increment instead of an
+    ad hoc constant, and that places the threshold at a documented point between the one- and
+    two-pair levels rather than leaving that choice to the caller.
     """
     return tq_baseline(n_oxygen, c) + float(delta)
 
 
-def calibrate_tq_threshold(tq_trajectory, percentile=99.9, margin=0.05):
+# -------------------------------------------------------------------------------------------
+# CALIBRATION BUG (found + fixed 2026-09-25) -- read this before touching either function below
+# -------------------------------------------------------------------------------------------
+#
+# The original `calibrate_tq_threshold` (below `tq_single_pair_threshold`) computed
+# ``percentile(tq_trajectory, 99.9) + 0.05`` from an UNBIASED, intact-water trajectory
+# (``runs/stability_0925/tq_threshold.json``: 512 oxygens, baseline N_O*sqrt(c) = 51.20, the
+# trajectory's own Tq ranged 51.213-51.306, giving threshold = 51.30060 + 0.05 = 51.35060). That
+# is a calibration of Tq's BASELINE (zero-pair) NOISE FLOOR only -- it says nothing about where a
+# single ADMITTED ion pair's Tq actually sits, because the reference trajectory never contained
+# one. It was then used, unmodified, as `tq_upper_wall`'s threshold for `--method
+# funnel_metad_sabf` production runs meant to SAMPLE a single dissociated pair
+# (``runs/stability_0925/{G,H}_biased_funnel_512w_pure_full``, ``tq_threshold: 51.350603``).
+#
+# Measured directly (2026-09-25, see `MEASURED_ONE_PAIR_TQ_INCREMENT` below for the full
+# provenance): a single H3O+/OH- pair raises Tq by ~1.8 units above baseline in the idealized
+# fully-separated limit, and by 0.75-2.36 units (mean 1.63, n=719 real category-C/Cb frames,
+# 128w/256w, pure water + CaCl2/CaI2/LiI/LiCl) in real, thermally-disordered MD frames -- i.e. AT
+# LEAST 15x the old margin (0.05) and comfortably above the old threshold's headroom above
+# baseline (0.15 = 51.350603 - 51.2). A wall calibrated the old way therefore forbids the very
+# single pair the "funnel" is supposed to admit (confirmed: neither G nor H's 2 ps smoke run --
+# window [0, 2.3] on CVDist -- ever formed a pair, so `defects.dat` never actually exercised the
+# wall above Tq ~= baseline and this could not have been caught by that smoke run alone).
+#
+# Both functions below now REQUIRE a measured single-pair Tq increment (there is no way to call
+# either one and silently reproduce the bug): `tq_single_pair_threshold` defaults it to the
+# analytic `MEASURED_ONE_PAIR_TQ_INCREMENT` constant (fine for ordinary use -- no reference
+# trajectory needed), and `calibrate_tq_threshold` now RAISES ``ValueError`` if
+# ``one_pair_increment`` is omitted, rather than returning a value that merely looks plausible.
+
+
+def _analytic_one_pair_tq_increment(c=DEFAULT_TQ_C):
     """
-    Empirically calibrate `tq_upper_wall`'s ``threshold`` from an UNBIASED (or main-CV-only
-    biased) trajectory's Tq time series, so the wall sits just above Tq's natural fluctuation
-    ceiling in the "at most one ion pair" regime rather than clipping physical fluctuations.
+    ``2 * (sqrt(1 + c) - sqrt(c))``: the EXACT, idealized Tq increment of one fully-separated,
+    fully-saturated H3O+/OH- pair over the fully-associated baseline -- one oxygen's charge
+    deficit ``q_o`` saturates to ``+1`` (H3O+) and the other to ``-1`` (OH-) when the pair is far
+    from any other water/ion (see `tq_value`'s docstring); each then contributes
+    ``sqrt(1 + c) - sqrt(c)`` above its own ``sqrt(c)`` baseline term. Verified numerically
+    (2026-09-25) against `pysages.colvars.autoionization`'s own isolated-pair fixture
+    (equivalent to ``tests/test_autoion_cvs.py``'s ``_make_isolated_pair``) at separations
+    3-12 Angstrom: plateaus at exactly this value (1.8099751242... for ``c = 0.01``) for
+    separation >= ~4 Angstrom, i.e. as soon as the two ions stop directly sharing a softmax
+    neighbor.
+    """
+    c = float(c)
+    return 2.0 * (float(_onp.sqrt(1.0 + c)) - float(_onp.sqrt(c)))
+
+
+# Default single-pair Tq increment for `tq_single_pair_threshold` (below), at `DEFAULT_TQ_C`.
+# Two independent lines of evidence, both gathered 2026-09-25 (script:
+# ``/scratch/slv5250/tmp/claude-4747652/-scratch-slv5250-SALT/c763f760-3dac-42e0-80fd-6eabd69d8e5a/
+# scratchpad/measure_tq_single_pair.py`` -- not part of this repo, kept for provenance only, same
+# convention as ``tests/test_autoion_cvs.py``'s ``extract_frames.py`` note):
+#
+#   (a) Idealized isolated pair (`_analytic_one_pair_tq_increment`, no bulk water/salt at all):
+#       1.80998 (exact, see above), matching this module's earlier ``delta ~= 2`` estimate in
+#       `tq_threshold_from_baseline`'s docstring.
+#   (b) Real MD frames: 719 category-C/Cb frames (128w/256w, pure water + CaCl2/CaI2/LiI/LiCl)
+#       from ``/scratch/slv5250/SALT/data/ml/mace_fmm_3581/train.extxyz`` with EXACTLY one clean
+#       H3O+/OH- pair under the discrete nearest-owner assignment `salt_md.defects` uses
+#       (free_cut=1.30): increment over the analytic baseline had mean 1.6268, min 0.7542, max
+#       2.3620, std 0.2602 -- consistent across both box sizes (128w mean 1.6204, 256w mean
+#       1.6678: the increment is a local, ~2-oxygen effect and does not scale with N_O) and
+#       across pure water vs every salt tested (means 1.58-1.67, no systematic ion-proximity
+#       shift in q_o beyond that same spread: e.g. a defect oxygen 2-3 Angstrom from a counter-ion
+#       still saturates to |q_o| ~= 0.9-1.0 as often as a bulk one does -- charge delocalization
+#       along a Grotthuss/proton-wire state, not ion proximity per se, is what pulls |q_o| down in
+#       the low-increment tail). A held-out check of 7 real frames with a genuine SECOND
+#       simultaneous clean pair (n_h3o == n_oh == 2) gave increment mean 2.8772 (min 1.9351, max
+#       4.1638) -- consistent with, though noisily below (small n), the analytic "2x" expectation
+#       (3.61995, confirmed exactly on two independent idealized isolated pairs in one box).
+#
+# The analytic value (a) is used as the default here rather than the empirical mean (b) because
+# it is reproducible from `c` alone (no corpus/composition dependence), and because the resulting
+# `tq_single_pair_threshold` (1.5x this value above baseline, i.e. 2.715 for the default) already
+# clears the full empirical single-pair range in (b) with comfortable margin (max observed 2.362
+# vs a threshold offset of 2.715 -- see that function's docstring) while sitting below the
+# empirical two-pair mean in (b) (2.8772). NOTE: (b)'s min (0.7542) and the 7-sample two-pair
+# min (1.9351) DO overlap -- a hard per-frame classifier cannot be built from Tq alone in every
+# case (rare, ambiguous, Grotthuss-delocalized states exist on both sides) -- but
+# `tq_upper_wall` is a soft, one-sided harmonic RESTRAINT, not a hard classifier: occasionally
+# not fully suppressing an atypical, low-charge second pair is an acceptable, documented
+# limitation, not a design bug (see the module docstring, "Tq ~= 2/4 ... in general").
+MEASURED_ONE_PAIR_TQ_INCREMENT = _analytic_one_pair_tq_increment(DEFAULT_TQ_C)
+
+
+def tq_single_pair_threshold(
+    n_oxygen, c=DEFAULT_TQ_C, lam=DEFAULT_LAMBDA, *,
+    one_pair_increment=MEASURED_ONE_PAIR_TQ_INCREMENT, margin=0.5,
+):
+    """
+    Analytic, misuse-resistant choice of `tq_upper_wall`'s ``threshold``: the point ``margin`` of
+    the way from the one-pair Tq level to the two-pair Tq level, both derived from
+    ``one_pair_increment`` (see `MEASURED_ONE_PAIR_TQ_INCREMENT` for its measurement and
+    provenance) rather than an arbitrary ``delta`` (contrast `tq_threshold_from_baseline`) or an
+    unbiased trajectory that may never have sampled a single pair at all (contrast
+    `calibrate_tq_threshold`, and see the "CALIBRATION BUG" note above this function for exactly
+    that failure mode).
+
+        one_pair_level = tq_baseline(n_oxygen, c) + one_pair_increment
+        two_pair_level = tq_baseline(n_oxygen, c) + 2 * one_pair_increment
+        threshold      = one_pair_level + margin * (two_pair_level - one_pair_level)
+
+    ``margin=0.5`` (default) is the literal midpoint between the two levels. This is the
+    RECOMMENDED way to pick `tq_upper_wall`'s ``threshold`` for ordinary (non-custom ``c``/``lam``)
+    use -- no reference trajectory needed.
 
     Parameters
     ----------
-    tq_trajectory: array-like
-        Tq values sampled along the reference run.
-    percentile: float, default 99.9
-        Percentile of the empirical Tq distribution used as the base level.
-    margin: float, default 0.05
-        Extra Tq units added above that percentile, so the wall practically never fires in the
-        bulk of sampling -- only on the rare tail toward a second, simultaneous ion pair.
+    n_oxygen: int
+        Number of water oxygens in the box (salt ions excluded, as everywhere else in this
+        module) -- e.g. 512 for the SALT project's ``512w`` systems.
+    c: float, default `DEFAULT_TQ_C`
+        Must match the ``c`` the run's `Tq`/`tq_upper_wall` actually uses.
+    lam: float, default `DEFAULT_LAMBDA`
+        Must match the run's `Tq`/`CVDist` ``lam``. Not used in the threshold arithmetic itself
+        (only ``c`` enters `tq_baseline`), but accepted and required to be passed explicitly
+        alongside ``c`` so a caller who changes ``lam`` is prompted to check whether
+        ``one_pair_increment`` (measured at ``lam = DEFAULT_LAMBDA = 8.0`` / Angstrom) is still
+        valid -- charge saturation depends on ``lam`` -- and re-measure/override it if not.
+    one_pair_increment: float, default `MEASURED_ONE_PAIR_TQ_INCREMENT`
+        Tq increment of ONE admitted ion pair over `tq_baseline`. Override with a freshly
+        measured value if your system/composition/``c``/``lam`` differs meaningfully from the
+        water + CaCl2/CaI2/LiI/LiCl systems this default was measured on (see
+        `MEASURED_ONE_PAIR_TQ_INCREMENT`'s docstring for how it was measured, so the same
+        recipe can be repeated on a different system).
+    margin: float, default 0.5
+        Fraction of the way from the one-pair level to the two-pair level (0 = right at the
+        one-pair level, no headroom for its own fluctuations; 1 = right at the two-pair level,
+        no gating margin; 0.5 = literal midpoint, recommended).
 
     Returns
     -------
     float: recommended ``threshold`` for `tq_upper_wall`.
     """
+    del lam  # accepted for the reason documented above; not part of the arithmetic
+    baseline = tq_baseline(n_oxygen, c)
+    one_pair_level = baseline + float(one_pair_increment)
+    two_pair_level = baseline + 2.0 * float(one_pair_increment)
+    return one_pair_level + float(margin) * (two_pair_level - one_pair_level)
+
+
+def calibrate_tq_threshold(tq_trajectory, one_pair_increment=None, *, percentile=99.9, margin=0.5):
+    """
+    Empirically calibrate `tq_upper_wall`'s ``threshold`` from an UNBIASED (or main-CV-only
+    biased) reference trajectory's Tq time series PLUS a measured single-pair Tq increment, so
+    the wall sits ``margin`` of the way from the trajectory's own baseline-noise ceiling (NOT
+    from an admitted pair -- the reference trajectory is intact water, see below) to where a
+    second, simultaneous pair would put Tq.
+
+    ``one_pair_increment`` is a REQUIRED keyword-or-positional argument with NO usable default:
+    passing ``None`` (i.e. omitting it) raises ``ValueError`` instead of silently reproducing the
+    2026-09-25 calibration bug (see the "CALIBRATION BUG" note above `tq_single_pair_threshold`)
+    -- an unbiased, intact-water ``tq_trajectory`` only ever measures Tq's BASELINE fluctuation
+    ceiling; it cannot, by construction, tell you where an admitted single pair's Tq sits, and
+    ``percentile(tq_trajectory, ...) + margin`` alone (the old signature) is only ever a valid
+    threshold by coincidence.
+
+    Parameters
+    ----------
+    tq_trajectory: array-like
+        Tq values sampled along an UNBIASED (zero-pair) reference run, e.g.
+        ``runs/stability_0925/tq_threshold.json``'s ``tq_series``.
+    one_pair_increment: float, REQUIRED (no default)
+        Measured single-pair Tq increment -- pass `MEASURED_ONE_PAIR_TQ_INCREMENT` (this module)
+        unless you have measured your own (see that constant's docstring for the recipe; also
+        see `tq_single_pair_threshold`, the simpler analytic-baseline alternative to this
+        function that takes the same argument).
+    percentile: float, default 99.9
+        Percentile of ``tq_trajectory``'s empirical distribution used as the (zero-pair)
+        baseline-noise ceiling.
+    margin: float, default 0.5
+        Fraction of the way from the one-pair level (``percentile(tq_trajectory, percentile) +
+        one_pair_increment``) to the two-pair level (``... + 2 * one_pair_increment``); 0.5 is
+        the literal midpoint (recommended), matching `tq_single_pair_threshold`'s default.
+        NOTE: this replaces the OLD ``margin`` (an absolute Tq offset, default 0.05 -- roughly
+        3% of a real single-pair increment, which is precisely why the old calibration was
+        unsafe). Any old call site passing ``margin=0.05`` (or leaving it at its old default)
+        must be updated: the new default (0.5) plus the now-required ``one_pair_increment`` is
+        the correct replacement, not the old numeric value under a new meaning.
+
+    Returns
+    -------
+    float: recommended ``threshold`` for `tq_upper_wall`.
+    """
+    if one_pair_increment is None:
+        raise ValueError(
+            "calibrate_tq_threshold requires one_pair_increment: an UNBIASED, intact-water "
+            "tq_trajectory's own percentile/spread is a baseline (zero-pair) NOISE ceiling, not "
+            "a valid threshold by itself -- it cannot tell you where an ADMITTED single pair's "
+            "Tq sits, because the reference trajectory never contains one. Calibrating this way "
+            "with no increment is exactly the 2026-09-25 bug this function was fixed to prevent "
+            "(runs/stability_0925/tq_threshold.json -> threshold 51.350603 for 512 oxygens, "
+            "which is BELOW the measured single-pair Tq range of ~52.8-53.6 for that box size -- "
+            "it would have forbidden the very pair the wall exists to admit). Pass "
+            "pysages.methods.funnel_metad_sabf.MEASURED_ONE_PAIR_TQ_INCREMENT, or your own "
+            "freshly-measured single-pair increment, or use tq_single_pair_threshold(...) "
+            "instead if you do not have (or need) a reference trajectory."
+        )
     values = _onp.asarray(tq_trajectory, dtype=float).reshape(-1)
     if values.size == 0:
         raise ValueError("tq_trajectory is empty")
-    return float(_onp.percentile(values, percentile) + margin)
+    baseline_ceiling = float(_onp.percentile(values, percentile))
+    one_pair_level = baseline_ceiling + float(one_pair_increment)
+    two_pair_level = baseline_ceiling + 2.0 * float(one_pair_increment)
+    return one_pair_level + float(margin) * (two_pair_level - one_pair_level)
