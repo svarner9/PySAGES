@@ -30,6 +30,34 @@ element through the compiled step alongside the sampling state, and reruns a chu
 that the rebuild overflowed its capacities (the chunk ran on a truncated structure, so it is not a
 trajectory). Pass ``in_step_refresh=False`` to ``SamplingContext`` to hold the structure instead.
 
+Capacity growth: pre-flight outside the scan (2026-09-25)
+-----------------------------------------------------------
+Root-caused on a real SALT/md job (funnel_metad_sabf, MACEFMM, 512 waters, one constructed H3O+/OH-
+pair): a mid-run FMM partition capacity growth -- perfectly survivable on its own (the *unbiased*
+``run_with_refresh(refresh_every=1)`` loop, ``nemora_jax.mlmd_fmm_calculator``, hits the identical
+growth live during equilibration with no incident) -- OOM'd here at ~139 GiB requested on a 46 GiB
+L40S, reproducibly, from a saved checkpoint (deterministic seed, same trajectory every time). The
+difference is not chunk/stride size (the unbiased loop's own chunks were, if anything, no smaller);
+it is what gets fused into the SAME compiled step alongside the grow-and-retry logic: this backend's
+``step()`` (above) always also runs the sampling method's own update -- for `Funnel_MetaDSpectralABF`
+specifically, a full reverse-mode Jacobian of BOTH `CVDist` and the auxiliary `Tq` wall CV over every
+atom. A capacity-growth recompile already asks XLA to rematerialize a lot to fit an enlarged FMM
+partition's own forward+backward pass; fusing a second, unrelated full-graph Jacobian into that exact
+same trace pushes the rematerialization search past what fits, where the plain-FMM-only unbiased loop
+never has to.
+
+Fix: BEFORE each chunk (not inside it), if the calculator's ``pysages_in_step_refresh`` refresher
+exposes the underlying calculator via a ``.calc`` attribute (every ``InStepRefresh``-shaped one does)
+and that calculator has its own standalone ``refresh_device(positions)`` (``MACEFMM`` does -- the same
+method the unbiased loop's OWN refresh uses, proven to survive growth there), call it at the chunk's
+starting positions first. Any growth it triggers happens as a plain, unfused device rebuild -- no CV/
+bias Jacobian anywhere near it -- so by the time the chunk's fused step actually runs, the partition is
+usually already sized correctly and the in-step ``overflowed``/``grow``/recompile-and-rerun path below
+(kept as-is, as a safety net for growth *within* a chunk) rarely has to fire at all. No physics
+changes: ``refresh_device`` only ever rebuilds the calculator's own bundle from positions it is
+handed, never touches ``dynamics.state``. Calculators without ``refresh_device`` are unaffected
+(the pre-flight call is skipped, exactly the old behavior).
+
 Callbacks
 ---------
 The Python ``callback(snapshot, state, timestep)`` is called once per *frame* — every ``stride``
@@ -248,6 +276,23 @@ def build_runner(dynamics, sampler, refresher=None):
                 carry, (frames, snapshots, states) = runner.advance(
                     carry, this_stride, n_frames)
             else:
+                # Pre-flight (2026-09-25, see the module docstring's "Capacity growth: pre-flight
+                # outside the scan" section): give the calculator's own standalone
+                # ``refresh_device`` a chance to grow+recompile ITS partition at the CURRENT
+                # positions before this chunk starts, so a needed growth (common the first time a
+                # trajectory visits a new, denser-than-census region) is discovered and paid for
+                # here -- a plain device call, unfused with anything else -- rather than for the
+                # first time inside the fused chunk below, where it would be tangled up with this
+                # method's own CV/bias gradient computation (see that section for why that combination
+                # OOMs even when neither alone would). Purely a memory/perf mitigation: skipped
+                # entirely for a calculator that does not expose ``refresh_device`` (checked via
+                # ``refresher.calc``, the attribute every ``InStepRefresh``-shaped refresher exposes),
+                # and it changes no physics -- ``refresh_device`` only ever rebuilds the calculator's
+                # OWN internal bundle from the positions it is given, never touches ``dynamics.state``.
+                preflight_calc = getattr(refresher, "calc", None)
+                preflight_refresh = getattr(preflight_calc, "refresh_device", None)
+                if preflight_refresh is not None:
+                    preflight_refresh(carry[0].positions)
                 # `fresh()` is re-read on every attempt: a growth moves the capacities it reports.
                 start = carry[:3] + (refresher.fresh(),)
                 while True:
