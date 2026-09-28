@@ -292,7 +292,22 @@ def build_runner(dynamics, sampler, refresher=None):
                 preflight_calc = getattr(refresher, "calc", None)
                 preflight_refresh = getattr(preflight_calc, "refresh_device", None)
                 if preflight_refresh is not None:
-                    preflight_refresh(carry[0].positions)
+                    # Guarded (2026-09-28, see "Capacity growth: pre-flight outside the scan"
+                    # above): this is a memory/perf optimization, not a correctness requirement
+                    # -- the in-step ``overflowed``/``grow``/recompile-and-rerun path just below
+                    # is the actual safety net and runs regardless of whether this succeeds. A
+                    # RuntimeError here (e.g. a calculator whose device builder has not been set
+                    # up yet -- MACEFMM raises "refresh_device needs refresh_backend='jax'" in
+                    # that case even when refresh_backend IS 'jax', because the check is really
+                    # "has build() run yet", not the config flag its message names) must never
+                    # abort an otherwise-healthy run; skip the pre-flight for this chunk and fall
+                    # through to the in-step path instead.
+                    try:
+                        preflight_refresh(carry[0].positions)
+                    except RuntimeError as exc:
+                        print(f"[pysages.backends.mlmd] pre-flight refresh_device skipped this "
+                              f"chunk ({exc!r}); relying on the in-step growth path instead",
+                              flush=True)
                 # `fresh()` is re-read on every attempt: a growth moves the capacities it reports.
                 start = carry[:3] + (refresher.fresh(),)
                 while True:
