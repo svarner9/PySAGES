@@ -45,5 +45,5 @@ export JAX_PLATFORMS=cpu
 exec "$PYTHON" -m pytest -q -m "not slow" \
     tests/test_autoion_cvs.py tests/test_cvs.py tests/test_nematic_cv.py \
     tests/test_metad_sabf.py tests/test_tq_and_aux_wall.py tests/test_mlmd_backend.py \
-    tests/test_funnel_metad_sabf.py \
+    tests/test_funnel_metad_sabf.py tests/test_mlmd_in_step_refresh.py tests/test_mlmd_grow_sanitize.py \
     "$@"

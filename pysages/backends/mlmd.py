@@ -188,6 +188,64 @@ def build_helpers(context, sampling_method):
     return HelperMethods(build_data_querier(snapshot_methods, flags), dimensionality)
 
 
+def _grow_from_first_overflow(refresher, extras):
+    """``refresher.grow(extras)`` with the chunk's running-maximum status replaced by the EXACT
+    status of the first overflowing frame (2026-10-07, SALT engine switch to nemora unified
+    6fcf215).
+
+    ``InStepRefresh.grow`` (nemora_jax.mlmd_fmm_calculator) first sizes the builder from
+    ``extras[2]``, the running maximum of every step's partition status over the WHOLE chunk.
+    But every frame after the first overflow was integrated on a truncated partition (the
+    chunk is not a trajectory and is rerun), and inside a biased fused step those frames can
+    degenerate (bias + wrong forces); their statuses are then garbage. Observed live (biased
+    funnel run, 512 w, gh117): ``leaf_atom_required`` = 1536 = every atom in one leaf, so the
+    builder grew ``leaf_atom`` 20 -> 1538 and the P2P block tile 20 -> 1536 (14,252 blocks x
+    1536^2 slots), which hung in compilation. Unbiased runs never showed it.
+
+    The frame ``extras[3]`` (``first_R``) is the last one reached on VALID partitions, so its
+    requirements are trustworthy: rebuild it with the calculator's own ``refresh_device`` (which
+    grows template and builder-internal families until that frame builds cleanly), then hand
+    ``grow`` its clean status instead of the contaminated maximum. ``grow`` keeps its bookkeeping
+    (history, ``max_growths``) and its own clean-rebuild check at ``first_R``. Later shortfalls in
+    the same chunk are found by the rerun, as before. Falls back to plain ``grow`` when the
+    refresher has no ``calc.refresh_device`` or no recorded first overflowing frame.
+    """
+    import numpy as onp
+
+    calc = getattr(refresher, "calc", None)
+    refresh = getattr(calc, "refresh_device", None)
+    if refresh is None or len(extras) < 5:
+        return refresher.grow(extras)
+    first_R = onp.asarray(jax.device_get(extras[3]))
+    if not onp.any(first_R) or not onp.isfinite(first_R).all():
+        return refresher.grow(extras)
+    kwargs = {}
+    first_cell = onp.asarray(jax.device_get(extras[4]), dtype=onp.float64)
+    build_cell = getattr(calc, "_cell", None)
+    if onp.any(first_cell) and build_cell is not None and not onp.allclose(first_cell, build_cell):
+        kwargs = dict(cell=first_cell)
+    worst = jax.device_get(extras[2])
+    clean = None
+    for _ in range(12):
+        _packed, _wrapped, clean = refresh(extras[3], **kwargs)
+        if not bool(jax.device_get(clean.overflow)):
+            break
+    else:
+        raise RuntimeError("first overflowing frame did not build cleanly after 12 refreshes")
+    clean_h = jax.device_get(clean)
+    try:
+        w_leaf, c_leaf = int(worst.leaf_atom_required), int(clean_h.leaf_atom_required)
+        if w_leaf > 2 * max(c_leaf, 1):
+            print(f"[pysages.backends.mlmd] in-step growth: chunk running max reports "
+                  f"leaf_atom_required={w_leaf}, the first overflowing frame needs {c_leaf} -- "
+                  "post-overflow frames were degenerate; growing from the first overflowing "
+                  "frame only", flush=True)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    sanitized = (extras[0], extras[1], clean) + tuple(extras[3:])
+    return refresher.grow(sanitized)
+
+
 def build_runner(dynamics, sampler, refresher=None):
     from mlmd.runner import advance_state, frames_snapshot
 
@@ -315,7 +373,7 @@ def build_runner(dynamics, sampler, refresher=None):
                         start, this_stride, n_frames)
                     if not refresher.overflowed(carry[3]):
                         break
-                    refresher.grow(carry[3])
+                    _grow_from_first_overflow(refresher, carry[3])
                     runner = dynamics.make_runner(make_step, snapshot_fn)
                     run.runner = runner
                     start = start[:3] + (refresher.fresh(),)
