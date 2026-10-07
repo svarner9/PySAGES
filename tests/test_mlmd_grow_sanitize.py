@@ -64,3 +64,13 @@ def test_falls_back_without_first_frame_or_calc():
     ex3 = ("t", onp.bool_(True), Status(True, 5))         # old 3-tuple extras -> plain grow
     _grow_from_first_overflow(ref3, ex3)
     assert ref3.seen[0] is ex3
+
+
+def test_non_finite_first_frame_raises():
+    calc = FakeCalc()
+    ref = FakeRefresher(calc)
+    R = onp.ones((4, 3))
+    R[2, 1] = onp.nan
+    with pytest.raises(FloatingPointError):
+        _grow_from_first_overflow(ref, _extras(R))
+    assert calc.calls == [] and ref.seen == []

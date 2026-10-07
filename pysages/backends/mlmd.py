@@ -217,8 +217,16 @@ def _grow_from_first_overflow(refresher, extras):
     if refresh is None or len(extras) < 5:
         return refresher.grow(extras)
     first_R = onp.asarray(jax.device_get(extras[3]))
-    if not onp.any(first_R) or not onp.isfinite(first_R).all():
+    if not onp.any(first_R):
         return refresher.grow(extras)
+    if not onp.isfinite(first_R).all():
+        # The overflow was CAUSED by non-finite coordinates (a NaN/inf frame builds a degenerate
+        # tree: every atom in one leaf). That is a diverged trajectory, not a capacity shortfall;
+        # growing the partition to fit it (leaf_atom -> N) only hangs the recompile.
+        bad = int((~onp.isfinite(first_R)).any(axis=-1).sum())
+        raise FloatingPointError(
+            f"in-step FMM overflow at a frame with {bad} non-finite atom positions: the dynamics "
+            "diverged inside this chunk (bias or forces), refusing to grow FMM capacities to fit it")
     kwargs = {}
     first_cell = onp.asarray(jax.device_get(extras[4]), dtype=onp.float64)
     build_cell = getattr(calc, "_cell", None)
