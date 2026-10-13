@@ -58,6 +58,10 @@ class ABFState(NamedTuple):
     Wp_: JaxArray (CV shape)
         Product of W matrix and momenta matrix for the previous step.
 
+    force_prev: JaxArray (2, CV shape)
+        ``force`` of the two updates before the last one (newest first), for the three-step
+        add-back of the applied bias (see ``update``).
+
     ncalls: int
         Counts the number of times the method's update has been called.
     """
@@ -69,6 +73,7 @@ class ABFState(NamedTuple):
     force: JaxArray
     Wp: JaxArray
     Wp_: JaxArray
+    force_prev: JaxArray = None
     ncalls: int = 0
 
     def __repr__(self):
@@ -167,6 +172,8 @@ def _abf(method, snapshot, helpers):
     tsolve = linear_solver(method.use_pinv)
     get_grid_index = build_indexer(grid)
     estimate_force = build_force_estimator(method)
+    stencil = getattr(method, "kwargs", {}).get("stencil_addback", True)
+    c1, c2, c3 = (2.25, -1.5, 0.25) if stencil else (1.0, 0.0, 0.0)
 
     query, dimensionality, to_force_units = helpers
 
@@ -187,7 +194,8 @@ def _abf(method, snapshot, helpers):
         force = np.zeros(dims)
         Wp = np.zeros(dims)
         Wp_ = np.zeros(dims)
-        return ABFState(xi, bias, hist, Fsum, force, Wp, Wp_)
+        force_prev = np.zeros((2, dims))
+        return ABFState(xi, bias, hist, Fsum, force, Wp, Wp_, force_prev)
 
     def update(state, data):
         """
@@ -216,13 +224,19 @@ def _abf(method, snapshot, helpers):
 
         I_xi = get_grid_index(xi)
         hist = state.hist.at[I_xi].add(1)
-        # Add previous force to remove bias
-        Fsum = state.Fsum.at[I_xi].add(to_force_units(dWp_dt) + state.force)
+        # Remove the bias impulse contained in the backward difference. With the mlmd backend's
+        # kick convention (backends/mlmd.py) the bias content of dWp_dt is
+        # -(2.25 f_{n-1} - 1.5 f_{n-2} + 0.25 f_{n-3}); adding back only f_{n-1} is exact for a
+        # smooth bias but leaves O(jump) errors next to the grid edges, where the applied force
+        # switches between the ABF estimate and the restraint.
+        f1, f2, f3 = state.force, state.force_prev[0], state.force_prev[1]
+        Fsum = state.Fsum.at[I_xi].add(to_force_units(dWp_dt) + c1 * f1 + c2 * f2 + c3 * f3)
 
         force = estimate_force(xi, I_xi, Fsum, hist).reshape(dims)
         bias = np.reshape(-Jxi.T @ force, state.bias.shape)
 
-        return ABFState(xi, bias, hist, Fsum, force, Wp, state.Wp, state.ncalls + 1)
+        force_prev = np.stack([f1, f2])
+        return ABFState(xi, bias, hist, Fsum, force, Wp, state.Wp, force_prev, state.ncalls + 1)
 
     return snapshot, initialize, generalize(update, helpers)
 

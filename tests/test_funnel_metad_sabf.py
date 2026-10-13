@@ -160,7 +160,8 @@ def _toy_energy(positions):
 
 
 def test_toy_wall_frestr_matches_analytic_projection():
-    """Frestr, accumulated per bin as ``restr = tsolve(Jxi, eforce)``, must match an
+    """Frestr, accumulated per bin as the three-step stencil of ``restr = tsolve(Jxi, eforce)``
+    from the previous three updates, must match an
     INDEPENDENTLY reconstructed analytic projection built from a per-step log of the raw
     trajectory (x, y) and the known closed form of the wall + main CV Jacobians -- not merely
     "small"/"zero", a genuine nonzero, hand-computable quantity (the main CV's Jacobian, a
@@ -190,10 +191,17 @@ def test_toy_wall_frestr_matches_analytic_projection():
     assert onp.any(f_wall > 0.0), "wall never fired -- toy parameters need adjusting"
     assert onp.any(f_wall == 0.0), "wall always fired -- toy parameters need adjusting"
 
+    # Each sample is credited with the three-step stencil of the external force applied at the
+    # three PREVIOUS updates (stencil_addback default; see funnel_metad_sabf.py), r_{-1..-3} = 0.
+    def lag(a, k):
+        return onp.concatenate([onp.zeros(k), a[:-k]])
+
+    stencil_restr = (2.25 * lag(analytic_restr, 1) - 1.5 * lag(analytic_restr, 2)
+                     + 0.25 * lag(analytic_restr, 3))
     get_index = build_indexer(method.grid)
     nbins = int(method.grid.shape[0])
     expected = onp.zeros(nbins)
-    for xv, rv in zip(x, analytic_restr):
+    for xv, rv in zip(x, stencil_restr):
         idx = int(onp.asarray(get_index(jnp.array([xv])))[0])
         if 0 <= idx < nbins:
             expected[idx] += rv

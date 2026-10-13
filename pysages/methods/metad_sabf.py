@@ -176,6 +176,7 @@ class MetaDSpectralABFState(NamedTuple):
     f_abf: JaxArray
     f_md: JaxArray
     n_clipped: JaxArray
+    force_applied_prev: JaxArray  # [2, cvs.shape]: force_applied of the two updates before last
 
     def __repr__(self):
         return repr("PySAGES " + type(self).__name__)
@@ -328,6 +329,8 @@ def _metad_sabf(method, snapshot, helpers):  # noqa: C901 -- one cohesive per-st
 
     tsolve = linear_solver(method.use_pinv)
     get_grid_index = build_indexer(grid)
+    # Add-back weights (see update): mlmd-backend three-step stencil, or the legacy single step.
+    c1, c2, c3 = (2.25, -1.5, 0.25) if method.kwargs.get("stencil_addback", True) else (1.0, 0.0, 0.0)
     fit = build_fitter(method.model)
     fit_forces = build_free_energy_fitter(N, fit)
     estimate_abf_force = build_force_estimator(method)
@@ -356,9 +359,10 @@ def _metad_sabf(method, snapshot, helpers):  # noqa: C901 -- one cohesive per-st
         f_abf = np.zeros(dims)
         f_md = np.zeros(dims)
         n_clipped = np.array(0, dtype=np.int64)
+        force_applied_prev = np.zeros((2, dims))
         return MetaDSpectralABFState(
             xi, bias, hist, Fsum, hist_prod, Fsum_prod, force_applied, Wp, Wp_, fun,
-            V_G, dV_G, heights, centers, idx, ncalls, f_abf, f_md, n_clipped,
+            V_G, dV_G, heights, centers, idx, ncalls, f_abf, f_md, n_clipped, force_applied_prev,
         )
 
     def update(state, data):
@@ -370,7 +374,17 @@ def _metad_sabf(method, snapshot, helpers):  # noqa: C901 -- one cohesive per-st
         Wp = tsolve(Jxi, p)
         dWp_dt = (1.5 * Wp - 2.0 * state.Wp + 0.5 * state.Wp_) / dt
         I_xi = get_grid_index(xi)
-        inc = to_force_units(dWp_dt) + state.force_applied
+        # The mlmd backend (backends/mlmd.py, Sampler step) reports p_n = m v_n + dt/2 b_{n-1}
+        # and applies each bias b_k as a full kick at x_k, so the bias impulse contained in the
+        # second-order backward difference (1.5 Wp_n - 2 Wp_{n-1} + 0.5 Wp_{n-2})/dt is
+        # -(2.25 f_{n-1} - 1.5 f_{n-2} + 0.25 f_{n-3}), not -f_{n-1}. Adding back only f_{n-1}
+        # leaves R_n = 1.25 f_{n-1} - 1.5 f_{n-2} + 0.25 f_{n-3}: ~0 for a smooth bias, but O(jump)
+        # whenever the applied CV force is discontinuous along the trajectory (grid-edge
+        # crossings, where the bias switches between f_abf+f_md and the restraint), which
+        # corrupts the bins within ~3 steps of travel of the grid edges. Add back the full stencil.
+        f1 = state.force_applied
+        f2, f3 = state.force_applied_prev[0], state.force_applied_prev[1]
+        inc = to_force_units(dWp_dt) + c1 * f1 + c2 * f2 + c3 * f3
         hist = state.hist.at[I_xi].add(1)
         Fsum = state.Fsum.at[I_xi].add(inc)
 
@@ -448,9 +462,11 @@ def _metad_sabf(method, snapshot, helpers):  # noqa: C901 -- one cohesive per-st
         n_clipped = state.n_clipped + np.where(clipped_cv | clipped_atom, 1, 0)
         force_applied = -tsolve(Jxi, bias_final.reshape(p.shape))
 
+        force_applied_prev = np.stack([f1, f2])
         return MetaDSpectralABFState(
             xi, bias_final, hist, Fsum, hist_prod, Fsum_prod, force_applied, Wp, state.Wp, fun,
             V_G, dV_G, heights, centers, idx, ncalls, f_abf_out, f_md_out, n_clipped,
+            force_applied_prev,
         )
 
     return snapshot, initialize, generalize(update, helpers)

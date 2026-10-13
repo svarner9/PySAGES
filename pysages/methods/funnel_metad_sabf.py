@@ -103,7 +103,7 @@ class Funnel_MetaDSpectralABFState(NamedTuple):
     """
     `Funnel_MetaDSpectralABF` internal state.
 
-    The first 19 fields are exactly `MetaDSpectralABFState`'s fields, in the SAME order (see
+    The first 20 fields are exactly `MetaDSpectralABFState`'s fields, in the SAME order (see
     that class's docstring for their semantics) -- ``_funnel_metad_sabf`` relies on this to
     slice ``state[:_N_BASE_FIELDS]`` back into a valid `MetaDSpectralABFState` for the inherited
     ``update``. New fields:
@@ -118,6 +118,13 @@ class Funnel_MetaDSpectralABFState(NamedTuple):
     perp: JaxArray []
         Last raw auxiliary-CV value (``external_force``'s second return value), diagnostic only
         -- never gridded, binned, or estimated. Zero when ``external_force is None``.
+
+    restr_prev: JaxArray [3, cvs.shape]
+        CV-space projections ``restr`` of the external force applied at the last three updates
+        (newest first). ``Frestr`` accumulates the same three-step stencil
+        ``2.25 r_{n-1} - 1.5 r_{n-2} + 0.25 r_{n-3}`` that the backward-difference estimator
+        picks up from the applied external force (see ``metad_sabf.py``, add-back comment), so
+        ``(Fsum + Frestr)/hist`` removes the external force exactly, including where it jumps.
     """
 
     xi: JaxArray
@@ -139,9 +146,11 @@ class Funnel_MetaDSpectralABFState(NamedTuple):
     f_abf: JaxArray
     f_md: JaxArray
     n_clipped: JaxArray
+    force_applied_prev: JaxArray
     Frestr: JaxArray
     Frestr_prod: JaxArray
     perp: JaxArray
+    restr_prev: JaxArray
 
     def __repr__(self):
         return repr("PySAGES " + type(self).__name__)
@@ -199,11 +208,14 @@ def _funnel_metad_sabf(method, snapshot, helpers, base_initialize, base_update):
     tsolve = linear_solver(method.use_pinv)
     get_grid_index = build_indexer(grid)
     query = helpers.query
+    c1, c2, c3 = (2.25, -1.5, 0.25) if method.kwargs.get("stencil_addback", True) else (1.0, 0.0, 0.0)
 
     def initialize():
         base_state = base_initialize()
         zeros = np.zeros((*grid.shape, dims))
-        return Funnel_MetaDSpectralABFState(*base_state, zeros, zeros, np.zeros(()))
+        return Funnel_MetaDSpectralABFState(
+            *base_state, zeros, zeros, np.zeros(()), np.zeros((3, dims))
+        )
 
     def update(snapshot, state):
         base_state = MetaDSpectralABFState(*state[:_N_BASE_FIELDS])
@@ -230,13 +242,18 @@ def _funnel_metad_sabf(method, snapshot, helpers, base_initialize, base_update):
         bias = new_base.bias - eforce
 
         # CV-space projection of the external force, accumulated separately (never into Fsum).
+        # The sample binned at this update carries the external impulse of the three previous
+        # updates (same stencil as the self-bias add-back in metad_sabf.py), not this one's.
         restr = tsolve(Jxi, eforce.reshape(p.shape))
+        r1, r2, r3 = state.restr_prev[0], state.restr_prev[1], state.restr_prev[2]
+        r_stencil = c1 * r1 + c2 * r2 + c3 * r3
         in_prod = new_base.ncalls > burn_in
-        Frestr = state.Frestr.at[I_xi].add(restr)
-        Frestr_prod = state.Frestr_prod.at[I_xi].add(np.where(in_prod, restr, 0.0))
+        Frestr = state.Frestr.at[I_xi].add(r_stencil)
+        Frestr_prod = state.Frestr_prod.at[I_xi].add(np.where(in_prod, r_stencil, 0.0))
+        restr_prev = np.stack([restr.reshape(dims), r1, r2])
 
         new_base = new_base._replace(bias=bias)
-        return Funnel_MetaDSpectralABFState(*new_base, Frestr, Frestr_prod, perp)
+        return Funnel_MetaDSpectralABFState(*new_base, Frestr, Frestr_prod, perp, restr_prev)
 
     return snapshot, initialize, jit(update)
 
