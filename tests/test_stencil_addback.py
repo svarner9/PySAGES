@@ -23,7 +23,7 @@ import jax.numpy as jnp  # noqa: E402
 import pysages  # noqa: E402
 from pysages.colvars import Component  # noqa: E402
 from pysages.grids import build_indexer  # noqa: E402
-from pysages.methods import ABF, CVRestraints, MetaDSpectralABF  # noqa: E402
+from pysages.methods import ABF, CVRestraints, MetaDSpectralABF, SpectralABF  # noqa: E402
 
 from test_metad_sabf import _one_particle  # noqa: E402
 
@@ -81,6 +81,26 @@ def test_abf_stencil_addback_free_particle(stencil):
     fsum = onp.asarray(state.Fsum).reshape(-1)
     assert hist[0] > 0 and hist[-1] > 0, "particle never reached the grid edges"
     # The first three samples (zeroed Wp history) all sit in the bin containing the start, x = 0.
+    start = int(onp.asarray(build_indexer(method.grid)(jnp.array([0.0])))[0])
+    keep = onp.ones_like(hist, dtype=bool)
+    keep[max(start - 1, 0):start + 2] = False
+    mean = onp.where(hist > 0, fsum / onp.maximum(hist, 1), 0.0)
+    if stencil:
+        assert onp.max(onp.abs(mean[keep])) < 1e-8, mean
+    else:
+        assert onp.max(onp.abs(mean[[0, -1]])) > 1e-2, mean
+
+
+@pytest.mark.parametrize("stencil", [True, False])
+def test_spectral_abf_stencil_addback_free_particle(stencil):
+    grid = pysages.Grid(**GRID, periodic=False)
+    method = SpectralABF([Component([0], 0)], grid, N=10**9, fit_threshold=10**9,
+                         restraints=RESTRAINTS, stencil_addback=stencil)
+    result = pysages.run(method, _ctx, STEPS)
+    state = result.states[0]
+    hist = onp.asarray(state.hist).reshape(-1)
+    fsum = onp.asarray(state.Fsum).reshape(-1)
+    assert hist[0] > 0 and hist[-1] > 0, "particle never reached the grid edges"
     start = int(onp.asarray(build_indexer(method.grid)(jnp.array([0.0])))[0])
     keep = onp.ones_like(hist, dtype=bool)
     keep[max(start - 1, 0):start + 2] = False

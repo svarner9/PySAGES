@@ -68,6 +68,10 @@ class SpectralABFState(NamedTuple):
 
     ncalls: int
         Counts the number of times the method's update has been called.
+
+    force_prev: JaxArray [2, cvs.shape]
+        ``force`` of the two updates before the last one (newest first), for the three-step
+        add-back of the applied bias (see ``abf.py``).
     """
 
     xi: JaxArray
@@ -79,6 +83,7 @@ class SpectralABFState(NamedTuple):
     Wp_: JaxArray
     fun: Fun
     ncalls: int = 0
+    force_prev: JaxArray = None
 
     def __repr__(self):
         return repr("PySAGES " + type(self).__name__)
@@ -165,6 +170,8 @@ def _spectral_abf(method, snapshot, helpers):
     fit = build_fitter(method.model)
     fit_forces = build_free_energy_fitter(method, fit)
     estimate_force = build_force_estimator(method)
+    stencil = method.kwargs.get("stencil_addback", True)
+    c1, c2, c3 = (2.25, -1.5, 0.25) if stencil else (1.0, 0.0, 0.0)
 
     query, dimensionality, to_force_units = helpers
 
@@ -177,7 +184,7 @@ def _spectral_abf(method, snapshot, helpers):
         Wp = np.zeros(dims)
         Wp_ = np.zeros(dims)
         fun = fit(Fsum)
-        return SpectralABFState(xi, bias, hist, Fsum, force, Wp, Wp_, fun)
+        return SpectralABFState(xi, bias, hist, Fsum, force, Wp, Wp_, fun, 0, np.zeros((2, dims)))
 
     def update(state, data):
         # During the intial stage use ABF
@@ -196,14 +203,17 @@ def _spectral_abf(method, snapshot, helpers):
         #
         I_xi = get_grid_index(xi)
         hist = state.hist.at[I_xi].add(1)
-        Fsum = state.Fsum.at[I_xi].add(to_force_units(dWp_dt) + state.force)
+        # Three-step add-back of the applied bias (mlmd kick convention; see abf.py).
+        f1, f2, f3 = state.force, state.force_prev[0], state.force_prev[1]
+        Fsum = state.Fsum.at[I_xi].add(to_force_units(dWp_dt) + c1 * f1 + c2 * f2 + c3 * f3)
         #
         force = estimate_force(
             PartialSpectralABFState(xi, hist, Fsum, I_xi, fun, in_fitting_regime)
         )
         bias = np.reshape(-Jxi.T @ force, state.bias.shape)
         #
-        return SpectralABFState(xi, bias, hist, Fsum, force, Wp, state.Wp, fun, ncalls)
+        force_prev = np.stack([f1, f2])
+        return SpectralABFState(xi, bias, hist, Fsum, force, Wp, state.Wp, fun, ncalls, force_prev)
 
     return snapshot, initialize, generalize(update, helpers)
 
